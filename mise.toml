@@ -1,0 +1,2 @@
+[tasks."run:mdm"]
+run = "c3c run mdm"
