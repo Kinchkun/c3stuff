@@ -80,8 +80,18 @@ const int CURL_HTTPPOST_LARGE       = 128;
 
 alias Curl_progress_callback = fn int(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow);
 alias Curl_xferinfo_callback = fn int(void* clientp, Off_t dltotal, Off_t dlnow, Off_t ultotal, Off_t ulnow);
-alias Curl_write_callback = fn usz(char* buffer, usz size, usz nitems, void* outstream);
+alias Curl_write_callback = fn usz(
+  char* buffer, 
+  usz size, 
+  usz nitems, 
+  void* outstream);
 alias Curl_resolver_start_callback = fn int(void* resolver_state, void* reserved, void* userdata);
+alias Curl_header_callback = fn usz(
+  ZString content,
+  usz size,
+  usz num_items,
+  void* userdata
+);
 
 enum Filetype : int
 {
