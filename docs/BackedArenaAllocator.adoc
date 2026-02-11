@@ -1,0 +1,287 @@
+= BackedArenaAllocator
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+The `BackedArenaAllocator` is an arena allocator that starts with a pre-allocated buffer and falls back to a backing allocator (typically the heap) when the buffer is exhausted. It supports `mark` and reset-to-mark, allowing multiple nested save points.
+
+This gives you the best of both worlds: fast arena allocation for the common case, with a safety net for unexpected spikes in memory usage. The trade-off is that fallback allocations have heap-like characteristics (individual allocations from the backing allocator) rather than arena characteristics.
+
+If you don't need mark/reset-to-mark and prefer that overflow allocations retain arena characteristics, use `DynamicArenaAllocator` instead.
+
+== When to Use BackedArenaAllocator
+
+Use a `BackedArenaAllocator` when:
+
+* You have a **good estimate** of total memory needed but want a **fallback** in case it's exceeded.
+* You need **mark/reset-to-mark** for nested scopes, combined with the ability to grow beyond the initial buffer.
+* You are building a **multi-phase pipeline** where each phase can be independently rolled back.
+
+Prefer other allocators when:
+
+[cols="1,3"]
+|===
+| Allocator | When to prefer it
+
+| `ArenaAllocator`
+| You have a hard upper bound on memory and don't need a fallback. Simpler and faster.
+
+| `DynamicArenaAllocator`
+| You don't need mark/reset-to-mark and want overflow allocations to retain arena (bump) characteristics.
+
+| `TempAllocator`
+| You need temporary, thread-local scratch memory. Used via `@pool()` and `tmalloc`.
+|===
+
+== Allocator Comparison
+
+[cols="2,1,1,1,1,1"]
+|===
+| Allocator | Arena | Uses buffer | OOM Fallback | Mark | Reset
+
+| `ArenaAllocator`
+| Yes
+| Yes
+| No
+| Yes
+| Yes (to mark)
+
+| `DynamicArenaAllocator`
+| Yes
+| No
+| Yes
+| No
+| Yes (full)
+
+| `BackedArenaAllocator`
+| Yes
+| Yes
+| Yes
+| Yes
+| Yes (to mark)
+
+| `TempAllocator`
+| Yes
+| No
+| Yes
+| No*
+| No*
+|===
+
+_* TempAllocator uses `@pool()` for mark/reset semantics._
+
+== API
+
+=== `new_backed_allocator`
+
+Create and initialize a `BackedArenaAllocator` with a given buffer size, allocated from the backing allocator.
+
+[source,c3]
+----
+fn BackedArenaAllocator*? new_backed_allocator(usz size, Allocator allocator)
+----
+
+`size`:: The size of the initial arena buffer. Must be `>= 16`.
+`allocator`:: The backing allocator used to allocate the initial buffer and any overflow pages.
+
+Returns a pointer to the newly created allocator, or an error on allocation failure.
+
+=== `mark`
+
+Save the current allocation state. Returns a value that can later be passed to `reset` to roll back to this point.
+
+[source,c3]
+----
+fn usz BackedArenaAllocator.mark(&self)
+----
+
+=== `reset`
+
+Reset the arena to a previously saved mark. All memory allocated after the mark is freed, including any overflow pages allocated from the backing allocator since that mark.
+
+[source,c3]
+----
+fn void BackedArenaAllocator.reset(&self, usz mark)
+----
+
+`mark`:: A value previously returned by `mark()`. Pass `0` to reset the entire arena.
+
+=== `destroy`
+
+Free all memory (the arena buffer, all overflow pages, and the allocator struct itself) back to the backing allocator. The allocator must not be used after calling `destroy()`.
+
+[source,c3]
+----
+fn void BackedArenaAllocator.destroy(&self)
+----
+
+=== Allocator Interface
+
+`BackedArenaAllocator` implements the `Allocator` interface, so it can be passed anywhere an `Allocator` is expected.
+
+== Examples
+
+=== Basic Usage
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    // Create with a 4096-byte initial buffer, backed by the heap.
+    BackedArenaAllocator* arena = new_backed_allocator(4096, mem)!!;
+    defer arena.destroy();
+
+    // Allocate from the arena.
+    int* value = allocator::alloc(arena, int)!!;
+    *value = 42;
+    io::printfn("Value: %d", *value);
+
+    // If allocations exceed 4096 bytes, they fall back to the heap.
+    int[] big = allocator::alloc_array(arena, int, 2048)!!;
+    big[0] = 1;
+}
+----
+
+=== Mark and Reset with Nested Scopes
+
+The key feature of `BackedArenaAllocator` is support for multiple save points. This enables nested scopes where inner work can be discarded without affecting outer allocations.
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    BackedArenaAllocator* arena = new_backed_allocator(8192, mem)!!;
+    defer arena.destroy();
+
+    // Phase 1: parse input.
+    usz phase1_mark = arena.mark();
+    int* header = allocator::alloc(arena, int)!!;
+    *header = 1;
+
+    // Phase 2: process data (nested scope).
+    usz phase2_mark = arena.mark();
+    int[] temp = allocator::alloc_array(arena, int, 100)!!;
+    foreach (i, &val : temp) *val = (int)i;
+    io::printfn("temp[10] = %d", temp[10]);
+
+    // Discard phase 2 work, keep phase 1.
+    arena.reset(phase2_mark);
+
+    // 'header' is still valid.
+    io::printfn("header = %d", *header);
+
+    // Discard everything.
+    arena.reset(phase1_mark);
+}
+----
+
+=== Scoped Allocator with `mem::@scoped`
+
+[source,c3]
+----
+import std::io;
+import std::core::mem;
+
+fn void main()
+{
+    BackedArenaAllocator* arena = new_backed_allocator(4096, mem)!!;
+    defer arena.destroy();
+
+    mem::@scoped(arena)
+    {
+        // Allocations in this block use the arena.
+        io::printfn("Hello from backed arena");
+    };
+
+    arena.reset(0);
+}
+----
+
+=== Multi-Pass Processing
+
+Process data in multiple passes, resetting between them but keeping a persistent result.
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    BackedArenaAllocator* arena = new_backed_allocator(4096, mem)!!;
+    defer arena.destroy();
+
+    // Persistent allocation (before any mark).
+    int* result = allocator::alloc(arena, int)!!;
+    *result = 0;
+
+    String[] items = { "alpha", "bravo", "charlie" };
+
+    foreach (item : items)
+    {
+        // Save state before each pass.
+        usz pass_mark = arena.mark();
+
+        // Temporary work.
+        char[] buf = allocator::alloc_array(arena, char, 256)!!;
+        // ... process item into buf ...
+        *result += (int)item.len;
+
+        // Discard temporary work, keep 'result'.
+        arena.reset(pass_mark);
+    }
+
+    io::printfn("Total length: %d", *result);
+}
+----
+
+=== Using as a Function Parameter
+
+[source,c3]
+----
+import std::collections::list;
+
+fn void main()
+{
+    BackedArenaAllocator* arena = new_backed_allocator(4096, mem)!!;
+    defer arena.destroy();
+
+    List(<int>) my_list;
+    my_list.new_init(16, arena);
+
+    my_list.push(10);
+    my_list.push(20);
+    my_list.push(30);
+
+    // Reset frees the list's internal storage along with everything else.
+    arena.reset(0);
+}
+----
+
+== How It Works
+
+The `BackedArenaAllocator` uses a two-tier allocation strategy:
+
+1. **Primary buffer**: A contiguous block of memory allocated at creation time. Allocations bump a `used` pointer forward (classic arena). Each allocation stores a small size header (`AllocChunk`) for tracking.
+
+2. **Overflow pages**: When the primary buffer is full, allocations fall back to the backing allocator. Each overflow allocation is wrapped in an `ExtraPage` struct that records:
+   - The mark at the time of creation (so `reset` knows which pages to free).
+   - A link to the previous overflow page (forming a linked list).
+
+3. **Mark/Reset**: `mark()` returns the current `used` value. `reset(mark)` walks the overflow page list, freeing any pages created after the mark, then restores `used`. This cleanly rolls back both arena and overflow allocations.
+
+4. **`destroy()`**: Calls `reset(0)` to free all overflow pages, then frees the allocator struct and its primary buffer.
+
+Key characteristics:
+
+* Arena allocations (within the buffer) are very fast -- pointer bumps with no heap interaction.
+* Overflow allocations have heap-like cost since each goes to the backing allocator individually.
+* `release()` can only reclaim space for the most recent arena allocation (LIFO).
+* Mark/reset is O(n) in the number of overflow pages created since the mark, but O(1) for arena-only resets.

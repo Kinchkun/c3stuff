@@ -1,0 +1,554 @@
+= UTF-8 and Unicode
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+All strings in C3 are UTF-8 encoded. `String` (`char[]`) and `ZString` (`char*`) store raw UTF-8 bytes. The standard library provides functions for:
+
+* Counting Unicode codepoints in a UTF-8 string
+* Iterating over codepoints with `StringIterator`
+* Detecting and handling invalid UTF-8 sequences
+* Converting between UTF-8, UTF-16, and UTF-32
+* Encoding/decoding single codepoints
+* Converting legacy codepages to/from UTF-8
+
+== Type Aliases
+
+[cols="1,1,2"]
+|===
+| Type | Underlying | Purpose
+
+| `String` | `char[]` | UTF-8 byte slice (pointer + length)
+| `ZString` | `char*` | Null-terminated UTF-8 string
+| `Char32` | `uint` | A single UTF-32 codepoint (U+0000 to U+10FFFF)
+| `Char16` | `ushort` | A UTF-16 code unit
+| `WString` | `Char16*` | Null-terminated UTF-16 string
+|===
+
+== Faults
+
+[cols="1,2"]
+|===
+| Fault | Meaning
+
+| `INVALID_UTF8` | Malformed UTF-8 sequence (truncated, bad continuation byte, overlong encoding)
+| `INVALID_UTF16` | Malformed UTF-16 (unmatched or reversed surrogate pair)
+| `CONVERSION_FAILED` | Output buffer too small, or codepoint above U+10FFFF
+|===
+
+== Counting Codepoints
+
+`String.len` gives the byte count. To get the number of Unicode codepoints, use `utf8_codepoints()`:
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String s = "Héllo 🌍";
+
+    io::printfn("Bytes:      %d", s.len);               // 10
+    io::printfn("Codepoints: %d", s.utf8_codepoints());  // 8
+}
+----
+
+For `ZString`, use `char_len()`:
+
+[source,c3]
+----
+ZString z = "café";
+usz codepoints = z.char_len();  // 4
+usz bytes = z.len();            // 5
+----
+
+== Iterating Over Codepoints
+
+`StringIterator` decodes UTF-8 byte sequences into `Char32` codepoints one at a time.
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String s = "A é 🎵";
+
+    StringIterator iter = s.iterator();
+    while (try Char32 cp = iter.next())
+    {
+        io::printfn("U+%04X", cp);
+    }
+    // U+0041  (A)
+    // U+0020  (space)
+    // U+00E9  (é)
+    // U+0020  (space)
+    // U+1F3B5 (🎵)
+}
+----
+
+=== StringIterator API
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `Char32? next(&self)`
+| Decode the next codepoint and advance. Returns `NO_MORE_ELEMENT` at end, `INVALID_UTF8` on bad data.
+
+| `Char32? peek(&self)`
+| Decode the next codepoint without advancing.
+
+| `bool has_next(&self)`
+| Check if there are more bytes to read.
+
+| `void reset(&self)`
+| Reset to the beginning of the string.
+
+| `Char32? get(&self)`
+| Get the most recently decoded codepoint.
+|===
+
+== Handling Invalid UTF-8
+
+`StringIterator.next()` and `conv::utf8_to_char32()` return `INVALID_UTF8` when they encounter malformed sequences. This lets you detect and handle bad data:
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    // Manually construct invalid UTF-8: 0xFF is never valid.
+    char[] bad = { 'H', 'i', 0xFF, '!' };
+    String s = (String)bad;
+
+    StringIterator iter = s.iterator();
+    while (iter.has_next())
+    {
+        if (try cp = iter.next())
+        {
+            io::printfn("U+%04X", cp);
+        }
+        else
+        {
+            io::printn("Invalid UTF-8 byte encountered");
+            break;
+        }
+    }
+    // U+0048 (H)
+    // U+0069 (i)
+    // Invalid UTF-8 byte encountered
+}
+----
+
+=== Validating an Entire String
+
+[source,c3]
+----
+fn bool is_valid_utf8(String s)
+{
+    StringIterator iter = s.iterator();
+    while (iter.has_next())
+    {
+        if (catch iter.next()) return false;
+    }
+    return true;
+}
+----
+
+== Encoding and Decoding Single Codepoints
+
+The `conv` module (in `std::core::string::conv`) provides low-level encoding functions.
+
+=== Codepoint to UTF-8
+
+[source,c3]
+----
+import std::core::string::conv;
+
+fn void main()
+{
+    // Safe version: writes to a buffer, returns bytes written.
+    char[4] buf;
+    usz n = conv::char32_to_utf8('é', &buf)!!;
+    // buf[:n] contains the UTF-8 bytes: { 0xC3, 0xA9 }
+
+    // Unsafe version: advances a pointer, no bounds check.
+    char[4] buf2;
+    char* ptr = &buf2;
+    usz n2 = conv::char32_to_utf8_unsafe('🌍', &ptr);
+    // buf2[:n2] contains 4 UTF-8 bytes
+}
+----
+
+=== UTF-8 to Codepoint
+
+[source,c3]
+----
+import std::core::string::conv;
+
+fn void main()
+{
+    char[] utf8 = { 0xC3, 0xA9 };  // é
+    usz size = utf8.len;
+    Char32 cp = conv::utf8_to_char32(utf8.ptr, &size)!!;
+    // cp == 0xE9 (é), size == 2 (bytes consumed)
+}
+----
+
+`utf8_to_char32` validates the input and returns `INVALID_UTF8` for:
+
+* Truncated multi-byte sequences
+* Invalid continuation bytes
+* Overlong encodings
+* Codepoints above U+10FFFF
+
+== Converting Between Encodings
+
+=== String Methods
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `Char32[]? String.to_utf32(Allocator)`
+| Convert UTF-8 string to UTF-32 array.
+
+| `Char32[]? String.to_temp_utf32()`
+| Same, using the temp allocator.
+
+| `Char16[]? String.to_utf16(Allocator)`
+| Convert UTF-8 string to UTF-16 array.
+
+| `Char16[]? String.to_temp_utf16()`
+| Same, using the temp allocator.
+
+| `WString? String.to_wstring(Allocator)`
+| Convert to null-terminated UTF-16 pointer.
+
+| `WString? String.to_temp_wstring()`
+| Same, using the temp allocator.
+|===
+
+=== Reverse Conversions (Free Functions)
+
+[cols="2,3"]
+|===
+| Function | Description
+
+| `string::from_utf32(Allocator, Char32[])`
+| Convert UTF-32 array to UTF-8 String.
+
+| `string::from_utf16(Allocator, Char16[])`
+| Convert UTF-16 array to UTF-8 String.
+
+| `string::from_wstring(Allocator, WString)`
+| Convert null-terminated UTF-16 to UTF-8 String.
+
+| `string::tfrom_utf16(Char16[])`
+| Temp allocator variant.
+
+| `string::tfrom_wstring(WString)`
+| Temp allocator variant.
+|===
+
+=== Example: Round-Trip Through UTF-32
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String original = "Hello 🌍";
+
+    // UTF-8 → UTF-32
+    Char32[] codepoints = original.to_temp_utf32()!!;
+    io::printfn("Codepoints: %d", codepoints.len);
+
+    // Inspect individual codepoints.
+    foreach (cp : codepoints)
+    {
+        io::printfn("  U+%04X", cp);
+    }
+
+    // UTF-32 → UTF-8
+    String back = string::from_utf32(mem, codepoints);
+    assert(back == original);
+}
+----
+
+=== Example: UTF-8 to UTF-16 for Windows APIs
+
+[source,c3]
+----
+fn void main()
+{
+    String path = "C:\\Users\\日本語\\file.txt";
+
+    // Convert to UTF-16 for Windows wide-char APIs.
+    Char16[] wide = path.to_temp_utf16()!!;
+
+    // Or as a null-terminated WString pointer.
+    WString wpath = path.to_temp_wstring()!!;
+}
+----
+
+== Length Calculation Functions
+
+These calculate the output size needed before converting, useful when writing into pre-allocated buffers.
+
+[cols="2,3"]
+|===
+| Function | Description
+
+| `conv::utf8_codepoints(String)`
+| Count UTF-8 codepoints.
+
+| `conv::utf8len_for_utf32(Char32[])`
+| UTF-8 bytes needed to encode UTF-32 data.
+
+| `conv::utf8len_for_utf16(Char16[])`
+| UTF-8 bytes needed to encode UTF-16 data.
+
+| `conv::utf16len_for_utf8(String)`
+| UTF-16 units needed to encode UTF-8 data.
+
+| `conv::utf16len_for_utf32(Char32[])`
+| UTF-16 units needed to encode UTF-32 data.
+|===
+
+== Buffer Conversion Functions
+
+For converting into pre-allocated buffers without heap allocation.
+
+=== Safe (Bounds-Checked)
+
+[source,c3]
+----
+// UTF-32 → UTF-8 buffer
+char[256] buf;
+usz bytes_written = conv::utf32to8(codepoints, &buf)!!;
+
+// UTF-8 → UTF-32 buffer
+Char32[64] cp_buf;
+usz cps_written = conv::utf8to32(my_string, &cp_buf)!!;
+----
+
+=== Unsafe (No Bounds Check)
+
+For performance-critical paths where you have pre-calculated the required size:
+
+[source,c3]
+----
+// Calculate size first.
+usz needed = conv::utf8len_for_utf32(codepoints);
+char* buf = allocator::malloc(mem, needed);
+
+// Convert without bounds checking.
+conv::utf32to8_unsafe(codepoints, buf);
+----
+
+Other unsafe variants: `conv::utf8to32_unsafe`, `conv::utf8to16_unsafe`, `conv::utf16to8_unsafe`.
+
+== DString UTF-32 Support
+
+xref:DString.adoc[DString] can append and insert Unicode codepoints directly, encoding them as UTF-8 internally.
+
+[source,c3]
+----
+import std::core::dstring;
+
+fn void main()
+{
+    DString s = dstring::temp();
+
+    s.append("Hello ");
+    s.append_char32('🌍');        // append single codepoint
+    s.append_char32(0x2764);      // ❤
+
+    // Append an array of codepoints.
+    Char32[] emoji = { 0x1F600, 0x1F601, 0x1F602 };
+    s.append_utf32(emoji);        // 😀😁😂
+
+    io::printn(s.str_view());
+
+    // Insert codepoint at a position.
+    s.insert_char32_at(6, '!');
+
+    // Convert entire DString to UTF-32.
+    Char32[] all = s.copy_utf32(mem);
+}
+----
+
+== Compile-Time Unicode Literals
+
+C3 provides built-in macros for creating UTF-16 and UTF-32 data at compile time:
+
+[source,c3]
+----
+// UTF-32 pointer (null-terminated).
+Char32* ws32 = string::@wstring32("Hello 🌍");
+
+// UTF-32 slice (no null terminator in slice).
+Char32[] chars32 = string::@char32("Hello 🌍");
+
+// UTF-16 pointer (null-terminated).
+WString ws16 = string::@wstring("Hello 🌍");
+
+// UTF-16 slice.
+Char16[] chars16 = string::@char16("Hello 🌍");
+----
+
+== String Escaping and Unescaping
+
+The `String.escape` and `String.unescape` functions handle C-style escape sequences including Unicode escapes.
+
+[source,c3]
+----
+fn void main()
+{
+    // Escape special characters.
+    String raw = "line1\nline2\t\"quoted\"";
+    String escaped = raw.escape(mem);
+    io::printn(escaped);  // line1\nline2\t\"quoted\"
+
+    // Unescape with Unicode support.
+    // Supports \xHH, \uHHHH, and \UHHHHHHHH.
+    String unicode_escaped = `\u00E9`;  // raw string literal
+    String unescaped = unicode_escaped.unescape(mem)!!;
+    io::printn(unescaped);  // é
+}
+----
+
+== Codepage Conversion
+
+The `std::encoding::codepage` module converts between legacy single-byte encodings and UTF-8. Over 40 codepages are supported.
+
+=== Supported Codepages
+
+* **Windows**: CP1250--CP1258
+* **IBM/DOS**: CP437, CP737, CP775, CP850, CP852, CP855, CP857, CP860--CP866, CP869, CP874
+* **ISO**: ISO-8859-1 through ISO-8859-16
+* **ASCII**: US-ASCII
+
+=== Decoding (Codepage to UTF-8)
+
+[source,c3]
+----
+import std::encoding::codepage;
+
+fn void main()
+{
+    // Raw bytes in Windows-1252 encoding.
+    char[] latin_bytes = { 0xC9, 0x63, 0x6F, 0x6C, 0x65 };  // "École"
+
+    // Decode to UTF-8.
+    String utf8 = codepage::decode(mem, latin_bytes, CP1252);
+    io::printn(utf8);  // École
+}
+----
+
+=== Encoding (UTF-8 to Codepage)
+
+[source,c3]
+----
+import std::encoding::codepage;
+
+fn void main()
+{
+    String utf8 = "café";
+
+    // Encode to ISO-8859-1.
+    // Unmappable codepoints are replaced with the replacement character (0x1A).
+    char[] encoded = codepage::encode(mem, utf8, ISO_8859_1, codepage::REPLACEMENT_CHAR);
+}
+----
+
+=== Buffer Variants
+
+For encoding/decoding into pre-allocated buffers without heap allocation:
+
+[source,c3]
+----
+char[256] out_buf;
+
+// Decode into buffer.
+usz n = codepage::decode_buffer(latin_bytes, &out_buf, CP1252);
+String result = (String)out_buf[:n];
+
+// Encode into buffer.
+usz n2 = codepage::encode_buffer(utf8_string, &out_buf, ISO_8859_1, 0x1A);
+----
+
+=== Lookup by Name
+
+[source,c3]
+----
+// Look up codepage by string name (case-insensitive).
+if (try cp = codepage::for_name("iso-8859-1"))
+{
+    String utf8 = codepage::decode(mem, raw_bytes, cp);
+}
+----
+
+== Summary
+
+[cols="1,2,2"]
+|===
+| Task | Function / Method | Module
+
+| Count codepoints
+| `String.utf8_codepoints()`, `ZString.char_len()`
+| `std::core::string`
+
+| Iterate codepoints
+| `String.iterator()` -> `StringIterator`
+| `std::core::string::iterator`
+
+| Validate UTF-8
+| `conv::utf8_to_char32()` returns `INVALID_UTF8`
+| `std::core::string::conv`
+
+| Encode codepoint
+| `conv::char32_to_utf8()`, `conv::char32_to_utf8_unsafe()`
+| `std::core::string::conv`
+
+| Decode codepoint
+| `conv::utf8_to_char32()`
+| `std::core::string::conv`
+
+| String -> UTF-32
+| `String.to_utf32()`, `String.to_temp_utf32()`
+| `std::core::string`
+
+| String -> UTF-16
+| `String.to_utf16()`, `String.to_temp_utf16()`
+| `std::core::string`
+
+| UTF-32 -> String
+| `string::from_utf32()`
+| `std::core::string`
+
+| UTF-16 -> String
+| `string::from_utf16()`
+| `std::core::string`
+
+| Append codepoint
+| `DString.append_char32()`, `DString.append_utf32()`
+| `std::core::dstring`
+
+| Compile-time UTF-16/32
+| `@wstring()`, `@char32()`, `@wstring32()`, `@char16()`
+| `std::core::string`
+
+| Codepage decode
+| `codepage::decode()`, `codepage::decode_buffer()`
+| `std::encoding::codepage`
+
+| Codepage encode
+| `codepage::encode()`, `codepage::encode_buffer()`
+| `std::encoding::codepage`
+|===

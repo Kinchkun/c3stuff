@@ -1,0 +1,433 @@
+= DString
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`DString` is C3's dynamic string builder. It is a heap-allocated, growable, mutable string that implements the `OutStream` interface. Use it when you need to construct strings incrementally -- appending, inserting, deleting, or formatting text.
+
+[source,c3]
+----
+typedef DString (OutStream) = DStringOpaque*;
+----
+
+`DString` is an opaque pointer to an internal structure that holds the character data, length, capacity, and a reference to its allocator. It grows automatically when appended to.
+
+For read-only string views, see xref:String.adoc[String]. For null-terminated C interop strings, see xref:ZString.adoc[ZString].
+
+== When to Use DString
+
+Use `DString` when:
+
+* You need to **build a string incrementally** -- appending parts, formatting values, joining pieces.
+* You need a **mutable string** -- inserting, deleting, or replacing characters.
+* You want to use a string as an **output stream** -- `DString` implements `OutStream`, so it works with `io::fprint`, `Formatter`, and stream copy operations.
+* You need to produce a `ZString` view without a separate allocation -- `DString.zstr_view()` ensures null termination in place.
+
+Prefer other types when:
+
+[cols="1,3"]
+|===
+| Type | When to prefer it
+
+| `String`
+| You only need to read, search, slice, or pass around text. Cheaper (no heap allocation).
+
+| `ZString`
+| You have a static null-terminated string for C interop. No builder needed.
+|===
+
+== API Reference
+
+=== Creation and Initialization
+
+[cols="2,3"]
+|===
+| Method / Function | Description
+
+| `DString.init(&self, Allocator, usz capacity = 16)`
+| Initialize with a specific allocator and optional starting capacity.
+
+| `DString.tinit(&self, usz capacity = 16)`
+| Initialize with the temp allocator.
+
+| `dstring::new(Allocator, String initial = "")`
+| Create a new DString with optional initial content.
+
+| `dstring::temp(String initial = "")`
+| Create with the temp allocator.
+
+| `dstring::new_with_capacity(Allocator, usz capacity)`
+| Create with a specific starting capacity.
+
+| `dstring::temp_with_capacity(usz capacity)`
+| Create with capacity using the temp allocator.
+|===
+
+=== Appending
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void append(&self, value)`
+| Append a `char`, `String`, `DString`, or `Char32`. Macro that dispatches by type.
+
+| `void append_char(&self, char c)`
+| Append a single byte.
+
+| `usz append_char32(&self, Char32 c)`
+| Append a UTF-32 codepoint (encoded as UTF-8). Returns bytes written.
+
+| `void append_string(&self, str)`
+| Append a `String` or `DString`.
+
+| `void append_bytes(&self, char[] bytes)`
+| Append raw bytes.
+
+| `void append_repeat(&self, char c, usz times)`
+| Append a character repeated N times.
+
+| `usz append_utf32(&self, Char32[] chars)`
+| Append an array of UTF-32 codepoints.
+
+| `usz? appendf(&self, String fmt, args...)`
+| Append formatted text (like `printf`).
+
+| `usz? appendfn(&self, String fmt, args...)`
+| Append formatted text with a trailing newline.
+|===
+
+=== Insertion
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void insert_at(&self, usz index, value)`
+| Insert a `char`, `String`, `DString`, or `Char32` at a position. Macro.
+
+| `void insert_char_at(&self, usz index, char c)`
+| Insert a single byte at a position.
+
+| `void insert_chars_at(&self, usz index, String s)`
+| Insert a string at a position.
+
+| `void insert_string_at(&self, usz index, DString s)`
+| Insert a DString at a position.
+
+| `usz insert_char32_at(&self, usz index, Char32 c)`
+| Insert a UTF-32 codepoint at a position.
+
+| `usz insert_utf32_at(&self, usz index, Char32[] chars)`
+| Insert UTF-32 codepoints at a position.
+|===
+
+=== Modification
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void delete(&self, usz start, usz len = 1)`
+| Delete `len` characters starting at `start`.
+
+| `void delete_range(&self, usz start, usz end)`
+| Delete characters from `start` to `end` (inclusive).
+
+| `void replace(&self, String needle, String replacement)`
+| Replace all occurrences of a substring in place.
+
+| `void replace_char(self, char old, char new)`
+| Replace all occurrences of a character.
+
+| `void reverse(self)`
+| Reverse the string in place.
+
+| `void clear(self)`
+| Empty the string (keeps allocated memory).
+
+| `void chop(self, usz new_size)`
+| Truncate to `new_size` characters.
+|===
+
+=== Access and Query
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz len(&self)`
+| Current length in bytes. Also available as `\|dstr\|` via `@operator(len)`.
+
+| `usz capacity(self)`
+| Current allocated capacity.
+
+| `char char_at(self, usz index)` (`[]` operator)
+| Read character at index.
+
+| `char* char_ref(&self, usz index)` (`&[]` operator)
+| Get a pointer to the character at index.
+
+| `void set(self, usz index, char c)` (`[]=` operator)
+| Set character at index.
+
+| `bool equals(self, DString other)`
+| Compare content equality.
+
+| `bool less(self, DString other)`
+| Lexicographic less-than comparison.
+|===
+
+=== Conversion
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `String str_view(self)`
+| Get an immutable `String` view. Zero-copy.
+
+| `ZString zstr_view(&self)`
+| Get a null-terminated `ZString` view. Ensures null termination in place.
+
+| `String copy_str(self, Allocator)`
+| Allocate and copy as a `String`.
+
+| `String tcopy_str(self)`
+| Copy as a `String` using the temp allocator.
+
+| `ZString copy_zstr(self, Allocator)`
+| Allocate and copy as a null-terminated `ZString`.
+
+| `DString copy(self, Allocator)`
+| Deep copy the DString with a new allocator.
+
+| `DString tcopy(&self)`
+| Deep copy using the temp allocator.
+
+| `Char32[] copy_utf32(&self, Allocator)`
+| Convert to a UTF-32 array.
+
+| `DString concat(self, Allocator, DString b)`
+| Concatenate two DStrings into a new one.
+
+| `DString tconcat(self, DString b)`
+| Concatenate using the temp allocator.
+|===
+
+=== Memory Management
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void reserve(&self, usz additional)`
+| Ensure capacity for at least `additional` more bytes.
+
+| `void free(&self)`
+| Free all memory and set the DString to null.
+|===
+
+=== OutStream Interface
+
+`DString` implements `OutStream`, so it can be used as a write target for formatted I/O.
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz? write(&self, char[] buffer)`
+| Append bytes (OutStream method).
+
+| `void? write_byte(&self, char c)`
+| Append a single byte (OutStream method).
+|===
+
+== Examples
+
+=== Basic String Building
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn void main()
+{
+    DString s = dstring::new(mem);
+    defer s.free();
+
+    s.append("Hello");
+    s.append_char(',');
+    s.append(" world!");
+
+    io::printn(s.str_view());  // Hello, world!
+}
+----
+
+=== Formatted Appending
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn void main()
+{
+    DString s = dstring::new(mem);
+    defer s.free();
+
+    s.appendf("Name: %s, Age: %d", "Alice", 30);
+    s.appendfn(", Score: %.1f", 95.5);
+
+    io::printn(s.str_view());
+    // Name: Alice, Age: 30, Score: 95.5
+}
+----
+
+=== Using as an OutStream
+
+Because `DString` implements `OutStream`, you can pass it to any function that writes to a stream.
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn void write_report(OutStream out)
+{
+    io::fprint(out, "Report: ")!!;
+    io::fprintn(out, "all systems nominal")!!;
+}
+
+fn void main()
+{
+    DString s = dstring::new(mem);
+    defer s.free();
+
+    write_report(&s);
+    io::printn(s.str_view());  // Report: all systems nominal
+}
+----
+
+=== Temporary String Building
+
+Use `dstring::temp()` for short-lived strings that don't need manual cleanup.
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn String build_greeting(String name)
+{
+    DString s = dstring::temp();
+    s.appendf("Hello, %s!", name);
+    return s.str_view();
+}
+
+fn void main()
+{
+    io::printn(build_greeting("Bob"));
+}
+----
+
+=== Insertion and Deletion
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn void main()
+{
+    DString s = dstring::new(mem, "Hello World");
+    defer s.free();
+
+    // Insert a comma.
+    s.insert_at(5, ',');
+    io::printn(s.str_view());  // Hello, World
+
+    // Delete "World" (index 7, length 5).
+    s.delete(7, 5);
+    io::printn(s.str_view());  // Hello,
+
+    // Append replacement.
+    s.append(" C3!");
+    io::printn(s.str_view());  // Hello, C3!
+}
+----
+
+=== Find and Replace
+
+[source,c3]
+----
+import std::io;
+import std::core::dstring;
+
+fn void main()
+{
+    DString s = dstring::new(mem, "foo bar foo baz foo");
+    defer s.free();
+
+    s.replace("foo", "qux");
+    io::printn(s.str_view());  // qux bar qux baz qux
+}
+----
+
+=== Getting a ZString for C Interop
+
+[source,c3]
+----
+import std::core::dstring;
+import libc;
+
+fn void main()
+{
+    DString path = dstring::temp("/tmp/");
+    path.append("output.txt");
+
+    // zstr_view() gives a null-terminated view without allocation.
+    libc::CFile f = libc::fopen(path.zstr_view(), "w");
+    if (f)
+    {
+        libc::fputs("data\n", f);
+        libc::fclose(f);
+    }
+}
+----
+
+=== Joining Strings
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String[] parts = { "one", "two", "three" };
+    String joined = string::tjoin(parts, ", ");
+    io::printn(joined);  // one, two, three
+}
+----
+
+== How It Works
+
+Internally, `DString` is a pointer to a `StringData` struct:
+
+[source]
+----
+StringData {
+    Allocator allocator;   // The allocator used for this DString
+    usz       len;         // Current number of bytes
+    usz       capacity;    // Total allocated space for characters
+    char[*]   chars;       // Flexible array of character data
+}
+----
+
+* **Growth**: When an append would exceed capacity, the buffer is reallocated to double its current size (or to the next power of 2 that fits). Minimum capacity is 16 bytes.
+* **`str_view()`**: Returns a `String` (pointer + length) pointing directly into the DString's buffer. Zero-copy, but the view is invalidated if the DString is modified or freed.
+* **`zstr_view()`**: Ensures a null byte exists after the last character (reserving space if needed) and returns a `char*`. Also zero-copy.
+* **OutStream**: The `write()` and `write_byte()` methods simply delegate to `append_bytes()` and `append_char()`, making DString usable as a general-purpose output target.
+* **`free()`**: Deallocates the underlying buffer via the allocator it was created with, and sets the DString pointer to null.

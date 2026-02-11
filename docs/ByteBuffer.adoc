@@ -1,0 +1,302 @@
+= ByteBuffer
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`ByteBuffer` is a bidirectional, dynamically growing byte buffer that implements both the `InStream` and `OutStream` interfaces. You write bytes into it and read them back out in FIFO order, making it useful as an in-memory pipe, staging buffer, or intermediate storage between a producer and a consumer.
+
+[source,c3]
+----
+struct ByteBuffer (InStream, OutStream)
+{
+    Allocator allocator;
+    usz max_read;
+    char[] bytes;
+    usz read_idx;
+    usz write_idx;
+    bool has_last;
+}
+----
+
+The buffer maintains separate read and write positions. Data is written at `write_idx` and read from `read_idx`. Once enough data has been read past (controlled by `max_read`), consumed bytes are discarded and the buffer compacts itself to reclaim space.
+
+For a write-only buffer, see xref:ByteWriter.adoc[ByteWriter]. For text building, see xref:DString.adoc[DString].
+
+== When to Use ByteBuffer
+
+Use `ByteBuffer` when:
+
+* You need a **producer/consumer buffer** -- write data on one side, read it on the other.
+* You need an **in-memory stream** that supports both `InStream` and `OutStream` -- useful for testing, adapters, or intermediate processing.
+* You need **seek** and **pushback** on an in-memory byte sequence.
+* You want to **bridge two stream-based APIs** where one writes and another reads.
+
+Prefer other types when:
+
+[cols="1,3"]
+|===
+| Type | When to prefer it
+
+| `ByteWriter`
+| You only need to accumulate bytes (write-only). Simpler, lighter.
+
+| `ByteReader`
+| You only need to read from an existing `char[]` (read-only). No allocation needed.
+
+| `DString`
+| You are building text with string-oriented operations.
+|===
+
+== API Reference
+
+=== Creation and Initialization
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `ByteBuffer* init(&self, Allocator, usz max_read, usz initial_capacity = 16)`
+| Initialize with an allocator. `max_read` controls when consumed bytes are compacted (see <<compaction>>).
+
+| `ByteBuffer* tinit(&self, usz max_read, usz initial_capacity = 16)`
+| Initialize with the temp allocator.
+
+| `ByteBuffer* init_with_buffer(&self, char[] buf)`
+| Initialize with a fixed, pre-allocated buffer. No allocator -- the buffer does not grow.
+|===
+
+=== Writing (OutStream)
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz? write(&self, char[] bytes)`
+| Append bytes at the write position. Grows the buffer if needed.
+
+| `void? write_byte(&self, char c)`
+| Append a single byte.
+|===
+
+=== Reading (InStream)
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz? read(&self, char[] buffer)`
+| Read up to `buffer.len` bytes into `buffer`. Returns bytes read, or `EOF` if no data is available.
+
+| `char? read_byte(&self)`
+| Read a single byte, or `EOF` if empty.
+
+| `void? pushback_byte(&self)`
+| Push back the last successfully read byte so it will be read again. Only the most recent byte can be pushed back.
+
+| `usz? available(&self)`
+| Return the number of bytes available to read.
+|===
+
+=== Seeking
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz? seek(&self, isz offset, Seek seek)`
+| Reposition the read cursor. Supports `SET` (absolute), `CURSOR` (relative), and `END` (from write position). Returns the new read position, or `INVALID_POSITION` on out-of-bounds.
+|===
+
+=== Cleanup
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void free(&self)`
+| Free the internal buffer (if an allocator was used) and reset the struct.
+|===
+
+== Examples
+
+=== Basic Write and Read
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    ByteBuffer buf;
+    buf.init(mem, 256);
+    defer buf.free();
+
+    // Write some data.
+    buf.write({ 0x01, 0x02, 0x03, 0x04 })!!;
+    buf.write_byte(0x05)!!;
+
+    // Read it back.
+    char[8] out;
+    usz n = buf.read(&out)!!;
+    io::printfn("Read %d bytes", n);  // Read 5 bytes
+
+    assert(out[0] == 0x01);
+    assert(out[4] == 0x05);
+}
+----
+
+=== In-Memory Pipe Between Producer and Consumer
+
+[source,c3]
+----
+import std::io;
+
+fn void produce(OutStream out)
+{
+    out.write({ 0xCA, 0xFE, 0xBA, 0xBE })!!;
+}
+
+fn char[4] consume(InStream in)
+{
+    char[4] header;
+    in.read(&header)!!;
+    return header;
+}
+
+fn void main()
+{
+    ByteBuffer buf;
+    buf.init(mem, 256);
+    defer buf.free();
+
+    // Producer writes via OutStream.
+    produce(&buf);
+
+    // Consumer reads via InStream.
+    char[4] data = consume(&buf);
+    assert(data[0] == 0xCA);
+    assert(data[3] == 0xBE);
+}
+----
+
+=== Seeking and Re-reading
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    ByteBuffer buf;
+    buf.init(mem, 256);
+    defer buf.free();
+
+    buf.write({ 'A', 'B', 'C', 'D', 'E' })!!;
+
+    // Read 3 bytes.
+    char[3] first;
+    buf.read(&first)!!;
+    assert(first == "ABC");
+
+    // Seek back to the start.
+    buf.seek(0, SET)!!;
+
+    // Re-read from the beginning.
+    char[5] all;
+    buf.read(&all)!!;
+    assert(all == "ABCDE");
+}
+----
+
+=== Pushback
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    ByteBuffer buf;
+    buf.init(mem, 256);
+    defer buf.free();
+
+    buf.write({ 0x01, 0x02, 0x03 })!!;
+
+    // Read a byte, then push it back.
+    char b = buf.read_byte()!!;
+    assert(b == 0x01);
+
+    buf.pushback_byte()!!;
+
+    // Read it again.
+    b = buf.read_byte()!!;
+    assert(b == 0x01);
+}
+----
+
+=== Fixed-Buffer Mode
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    char[32] storage;
+    ByteBuffer buf;
+    buf.init_with_buffer(&storage);
+
+    buf.write({ 0xDE, 0xAD })!!;
+    buf.write_byte(0xFF)!!;
+
+    char[3] out;
+    buf.read(&out)!!;
+    assert(out[0] == 0xDE);
+    assert(out[2] == 0xFF);
+
+    // No free() needed -- no heap allocation.
+}
+----
+
+=== Checking Available Data
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    ByteBuffer buf;
+    buf.init(mem, 256);
+    defer buf.free();
+
+    buf.write({ 0x01, 0x02, 0x03 })!!;
+
+    usz avail = buf.available()!!;
+    io::printfn("Available: %d", avail);  // Available: 3
+
+    buf.read_byte()!!;
+
+    avail = buf.available()!!;
+    io::printfn("Available: %d", avail);  // Available: 2
+}
+----
+
+[[compaction]]
+== How It Works
+
+The `ByteBuffer` uses a single contiguous buffer with two cursors:
+
+----
+[ consumed | readable | free space ]
+  ^          ^          ^
+  0        read_idx   write_idx    bytes.len
+----
+
+* **Writes** append at `write_idx`. If there isn't enough free space, the buffer grows to the next power of 2.
+* **Reads** consume from `read_idx` forward. When there is no readable data (`read_idx == write_idx`), reads return `EOF`.
+* **Compaction**: The `max_read` parameter controls when consumed bytes are discarded. Once `read_idx >= max_read`, the buffer compacts: it shifts the unread data (plus one byte for pushback) to the front and resets the cursors. This prevents the buffer from growing without bound in long-running producer/consumer scenarios.
+* **Pushback**: After a successful read, the last byte can be "unread" by decrementing `read_idx`. Only one level of pushback is supported.
+* **Seek**: Repositions `read_idx` within the range `[0, write_idx]`. Seeking past the write position returns `INVALID_POSITION`.
+* **Fixed-buffer mode** (`init_with_buffer`): No allocator is stored. The buffer cannot grow -- if writes exceed the buffer, the growth function will be called but since no allocator is present, behavior depends on the buffer size. Best for bounded use cases where you know the maximum data size.

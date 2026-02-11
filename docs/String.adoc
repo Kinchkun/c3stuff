@@ -1,0 +1,445 @@
+= String
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`String` is C3's primary string type. It is a typedef for `char[]` -- a slice (pointer + length) over a contiguous array of UTF-8 encoded bytes. Strings are **immutable views**: they do not own their data, and operations like trimming or slicing return new views over the same underlying memory without copying.
+
+[source,c3]
+----
+typedef String = inline char[];
+----
+
+Because `String` is a slice, it carries its length and does not require null termination. String literals in C3 are null-terminated behind the scenes for C interoperability, but `String` itself does not depend on this.
+
+For null-terminated C strings, see xref:ZString.adoc[ZString]. For a mutable, growable string builder, see xref:DString.adoc[DString].
+
+== When to Use String
+
+Use `String` when:
+
+* You need to **read, search, or inspect** text without modifying it.
+* You are passing text between functions -- `String` is cheap to copy (just a pointer and a length).
+* You are slicing, trimming, or splitting text -- these operations return new views without allocating.
+* You have a string literal -- all C3 string literals are `String`.
+
+Use a different type when:
+
+[cols="1,3"]
+|===
+| Type | When to prefer it
+
+| `ZString`
+| You need a null-terminated `char*` for C interop.
+
+| `DString`
+| You need to build or modify a string dynamically (append, insert, delete).
+|===
+
+== API Reference
+
+=== Searching
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `bool contains(String substr)`
+| Check if the string contains a substring.
+
+| `bool contains_char(char c)`
+| Check if the string contains a character.
+
+| `usz count(String substr)`
+| Count non-overlapping occurrences of a substring.
+
+| `usz? index_of(String substr)`
+| Index of first occurrence, or `NOT_FOUND`.
+
+| `usz? rindex_of(String substr)`
+| Index of last occurrence, or `NOT_FOUND`.
+
+| `usz? index_of_char(char c)`
+| Index of first character match, or `NOT_FOUND`.
+
+| `usz? rindex_of_char(char c)`
+| Index of last character match, or `NOT_FOUND`.
+
+| `usz? index_of_char_from(char c, usz start)`
+| Find character starting from a given index.
+
+| `usz? index_of_chars(char[] chars)`
+| Find first occurrence of any character in the set.
+|===
+
+=== Prefix and Suffix
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `bool starts_with(String prefix)`
+| Check if the string starts with a prefix.
+
+| `bool ends_with(String suffix)`
+| Check if the string ends with a suffix.
+
+| `String strip(String prefix)`
+| Remove a prefix if present, returning a subslice.
+
+| `String strip_end(String suffix)`
+| Remove a suffix if present, returning a subslice.
+|===
+
+=== Trimming
+
+All trim methods return subslices without allocating.
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `String trim(String chars = " \n\t\r\f\v")`
+| Trim characters from both ends.
+
+| `String trim_left(String chars)`
+| Trim characters from the left.
+
+| `String trim_right(String chars)`
+| Trim characters from the right.
+
+| `String trim_charset(AsciiCharset set)`
+| Trim using an `AsciiCharset` for faster lookup.
+|===
+
+=== Splitting and Tokenizing
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `String[] split(Allocator, String delim, ...)`
+| Split into an allocated array of substrings.
+
+| `String[] tsplit(String delim, ...)`
+| Split using the temp allocator.
+
+| `String[]? split_to_buffer(String delim, String[] buf, ...)`
+| Split into a pre-allocated buffer.
+
+| `Splitter tokenize(String delim)`
+| Create a lazy tokenizer (skips empty parts).
+
+| `Splitter tokenize_all(String delim)`
+| Create a lazy tokenizer (includes empty parts).
+|===
+
+=== Case Conversion
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void convert_to_lower()`
+| Convert ASCII characters to lowercase in place.
+
+| `void convert_to_upper()`
+| Convert ASCII characters to uppercase in place.
+
+| `String to_lower_copy(Allocator)` / `to_lower_tcopy()`
+| Return a lowercase copy.
+
+| `String to_upper_copy(Allocator)` / `to_upper_tcopy()`
+| Return an uppercase copy.
+
+| `String capitalize_copy(Allocator)`
+| Return a copy with the first letter capitalized.
+
+| `String snake_to_pascal_copy(Allocator)`
+| Convert `snake_case` to `PascalCase`.
+
+| `String pascal_to_snake_copy(Allocator)`
+| Convert `PascalCase` to `snake_case`.
+|===
+
+=== Copying and Memory
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `String copy(Allocator)`
+| Allocate a copy (with null terminator for safe ZString cast).
+
+| `String tcopy()`
+| Copy using the temp allocator.
+
+| `void free(&self, Allocator)`
+| Free a previously allocated string.
+
+| `String concat(Allocator, String s2)`
+| Concatenate two strings into a new allocation.
+
+| `String tconcat(String s2)`
+| Concatenate using the temp allocator.
+
+| `String replace(Allocator, String needle, String replacement)`
+| Replace all occurrences, returning a new string.
+
+| `String treplace(String needle, String replacement)`
+| Replace using the temp allocator.
+|===
+
+=== Conversion to ZString
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `ZString zstr_copy(Allocator)`
+| Allocate a null-terminated copy.
+
+| `ZString zstr_tcopy()`
+| Null-terminated copy via temp allocator.
+|===
+
+=== Conversion to Other Encodings
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `Char16[]? to_utf16(Allocator)` / `to_temp_utf16()`
+| Convert UTF-8 to UTF-16.
+
+| `Char32[]? to_utf32(Allocator)` / `to_temp_utf32()`
+| Convert UTF-8 to UTF-32.
+
+| `WString? to_wstring(Allocator)` / `to_temp_wstring()`
+| Convert to a null-terminated UTF-16 pointer.
+|===
+
+=== Numeric Parsing
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `int? to_int(int base = 10)`
+| Parse as `int`. Supports `0x`, `0o`, `0b` prefixes.
+
+| `uint? to_uint(int base = 10)`
+| Parse as `uint`.
+
+| `long? to_long(int base = 10)` / `ulong?`
+| Parse as `long` / `ulong`.
+
+| `double? to_double()`
+| Parse as `double`.
+
+| `float? to_float()`
+| Parse as `float`.
+|===
+
+=== Unicode
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz utf8_codepoints()`
+| Count Unicode codepoints (not bytes).
+
+| `StringIterator iterator()`
+| Create a UTF-8 aware codepoint iterator.
+|===
+
+== Free Functions
+
+[cols="2,3"]
+|===
+| Function | Description
+
+| `String tformat(String fmt, args...)`
+| Format a string using the temp allocator.
+
+| `String format(Allocator, String fmt, args...)`
+| Format a string using a specific allocator.
+
+| `String bformat(char[] buffer, String fmt, args...)`
+| Format into a pre-allocated buffer.
+
+| `String join(Allocator, String[] parts, String joiner)`
+| Join an array of strings with a separator.
+
+| `String tjoin(String[] parts, String joiner)`
+| Join using the temp allocator.
+|===
+
+== Examples
+
+=== Basic Usage
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String greeting = "Hello, world!";
+    io::printfn("Length: %d", greeting.len);
+    io::printfn("First 5: %s", greeting[:5]);
+    io::printfn("From 7: %s", greeting[7..]);
+}
+----
+
+=== Searching and Checking
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String s = "the quick brown fox";
+
+    if (s.contains("brown"))
+    {
+        io::printn("Found 'brown'");
+    }
+
+    if (try idx = s.index_of("quick"))
+    {
+        io::printfn("'quick' at index %d", idx);
+    }
+
+    assert(s.starts_with("the"));
+    assert(s.ends_with("fox"));
+    assert(s.count("o") == 2);
+}
+----
+
+=== Trimming and Stripping
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String padded = "  hello  ";
+    io::printfn("'%s'", padded.trim());           // 'hello'
+    io::printfn("'%s'", padded.trim_left());       // 'hello  '
+    io::printfn("'%s'", padded.trim_right());      // '  hello'
+
+    String path = "/usr/local/bin/";
+    io::printfn("%s", path.strip("/"));            // usr/local/bin/
+    io::printfn("%s", path.strip_end("/"));        // /usr/local/bin
+}
+----
+
+=== Splitting
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    String csv = "alice,bob,,charlie";
+
+    // Split with temp allocator.
+    String[] parts = csv.tsplit(",");
+    foreach (part : parts)
+    {
+        io::printfn("  '%s'", part);
+    }
+    // Output: 'alice', 'bob', '', 'charlie'
+
+    // Skip empty parts.
+    String[] names = csv.tsplit(",", .skip_empty = true);
+    // names: 'alice', 'bob', 'charlie'
+
+    // Lazy tokenizing (skips empty by default).
+    Splitter tok = "one::two::three".tokenize("::");
+    while (try part = tok.next())
+    {
+        io::printfn("  %s", part);
+    }
+}
+----
+
+=== Numeric Parsing
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    int val = "42".to_int()!!;
+    io::printfn("Parsed: %d", val);
+
+    // Hex with prefix.
+    uint hex = "0xFF".to_uint()!!;
+    io::printfn("Hex: %d", hex);
+
+    // Floating point.
+    double pi = "3.14159".to_double()!!;
+    io::printfn("Pi: %f", pi);
+
+    // Handle errors.
+    if (catch err = "not_a_number".to_int())
+    {
+        io::printfn("Parse failed: %s", err);
+    }
+}
+----
+
+=== Formatting
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    // Temp-allocated formatted string.
+    String msg = string::tformat("Hello, %s! You are %d.", "Alice", 30);
+    io::printn(msg);
+
+    // Format into a stack buffer (no allocation).
+    char[64] buf;
+    String s = string::bformat(&buf, "%d + %d = %d", 1, 2, 3);
+    io::printn(s);
+}
+----
+
+=== Conversion to ZString for C Interop
+
+[source,c3]
+----
+import libc;
+
+fn void main()
+{
+    String path = "output.txt";
+
+    // Create a temp null-terminated copy for C functions.
+    libc::CFile f = libc::fopen(path.zstr_tcopy(), "w");
+    if (f)
+    {
+        libc::fputs("written from c3\n", f);
+        libc::fclose(f);
+    }
+}
+----
+
+== How It Works
+
+* `String` is `char[]` -- a pointer and a length. Passing a `String` copies these two values, not the underlying bytes.
+* Slicing (`s[2..5]`, `s[:3]`, `s[4..]`) returns a new `String` pointing into the same memory. No allocation occurs.
+* Methods like `trim`, `strip`, `split_to_buffer`, and `tokenize` also return views without allocating.
+* Methods that produce new strings (e.g., `copy`, `replace`, `to_upper_copy`) require an `Allocator` parameter. Variants ending in `t` (e.g., `tcopy`, `treplace`) use the temp allocator.
+* String literals are stored in read-only memory and are null-terminated, but their `String` representation does not include the null byte in the length.

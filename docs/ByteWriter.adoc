@@ -1,0 +1,278 @@
+= ByteWriter
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`ByteWriter` is a dynamically growing binary buffer that implements the `OutStream` interface. It is the binary counterpart to xref:DString.adoc[DString] -- use it when you need to accumulate raw bytes rather than text.
+
+[source,c3]
+----
+struct ByteWriter (OutStream)
+{
+    char[] bytes;
+    usz index;
+    Allocator allocator;
+}
+----
+
+Writes append to an internal buffer that grows automatically via the backing allocator. The accumulated data is accessed through `array_view()` (as `char[]`) or `str_view()` (as `String`).
+
+`ByteWriter` can also be used with a fixed, pre-allocated buffer. In this mode it writes into the provided memory without any heap allocation, returning `OUT_OF_SPACE` if the buffer is exceeded.
+
+For a bidirectional buffer that supports both reading and writing, see xref:ByteBuffer.adoc[ByteBuffer].
+
+== When to Use ByteWriter
+
+Use `ByteWriter` when:
+
+* You need to **accumulate binary data** incrementally -- serialization, protocol encoding, file generation.
+* You want to **capture stream output** into a buffer -- pass a `ByteWriter` as an `OutStream` to any function that writes to a stream.
+* You need to **read an entire InStream into memory** -- use `read_from()` to consume a reader.
+* You want a **fixed-buffer writer** that writes into a pre-allocated `char[]` with no heap allocation.
+
+Prefer other types when:
+
+[cols="1,3"]
+|===
+| Type | When to prefer it
+
+| `DString`
+| You are building text and need string-oriented methods (append formatted text, replace, insert, etc.).
+
+| `ByteBuffer`
+| You need both reading and writing on the same buffer (bidirectional), or you need seek/pushback.
+
+| `WriteBuffer`
+| You want to add buffering on top of an existing `OutStream` (e.g., buffered file writes).
+|===
+
+== API Reference
+
+=== Creation and Initialization
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `ByteWriter* init(&self, Allocator)`
+| Initialize with a backing allocator. The buffer grows dynamically.
+
+| `ByteWriter* tinit(&self)`
+| Initialize with the temp allocator.
+
+| `ByteWriter* init_with_buffer(&self, char[] data)`
+| Initialize with a fixed buffer. No allocator -- writes fail with `OUT_OF_SPACE` when full.
+|===
+
+=== Writing
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz? write(&self, char[] bytes)`
+| Append bytes. Returns the number of bytes written. Implements `OutStream`.
+
+| `void? write_byte(&self, char c)`
+| Append a single byte. Implements `OutStream`.
+
+| `usz? read_from(&self, InStream reader)`
+| Read all available data from an `InStream` into the buffer. Returns total bytes read.
+|===
+
+=== Access
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `char[] array_view(self)`
+| Return the accumulated bytes as a `char[]` slice.
+
+| `String str_view(&self)`
+| Return the accumulated bytes as a `String` (cast of `char[]`).
+|===
+
+=== Cleanup
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `void? destroy(&self)`
+| Free the internal buffer (if an allocator was used) and reset to empty. Implements `OutStream.destroy`.
+|===
+
+== Examples
+
+=== Basic Binary Writing
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    ByteWriter writer;
+    writer.init(mem);
+    defer writer.destroy();
+
+    // Write raw bytes.
+    writer.write({ 0x48, 0x65, 0x6C, 0x6C, 0x6F })!!;
+    writer.write_byte(0x00)!!;
+
+    char[] data = writer.array_view();
+    io::printfn("Wrote %d bytes", data.len);  // Wrote 6 bytes
+}
+----
+
+=== Capturing Stream Output
+
+Because `ByteWriter` implements `OutStream`, you can pass it to any function that writes to a stream.
+
+[source,c3]
+----
+import std::io;
+
+fn void serialize(OutStream out)
+{
+    out.write({ 0x01, 0x02, 0x03 })!!;
+    out.write_byte(0xFF)!!;
+}
+
+fn void main()
+{
+    ByteWriter writer;
+    writer.init(mem);
+    defer writer.destroy();
+
+    serialize(&writer);
+
+    char[] result = writer.array_view();
+    foreach (b : result)
+    {
+        io::printf("%02x ", b);
+    }
+    io::printn("");  // 01 02 03 ff
+}
+----
+
+=== Reading an Entire Stream into Memory
+
+Use `read_from()` to consume all data from an `InStream`.
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    // Read from a ByteReader (or any InStream).
+    char[] source = { 0xDE, 0xAD, 0xBE, 0xEF };
+    ByteReader reader;
+    reader.init(&source);
+
+    ByteWriter writer;
+    writer.init(mem);
+    defer writer.destroy();
+
+    usz n = writer.read_from(&reader)!!;
+    io::printfn("Read %d bytes", n);  // Read 4 bytes
+
+    char[] data = writer.array_view();
+    assert(data[0] == 0xDE);
+    assert(data[3] == 0xEF);
+}
+----
+
+=== Fixed-Buffer Mode
+
+Use `init_with_buffer` to write into pre-allocated memory with no heap allocation.
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    char[64] buffer;
+    ByteWriter writer;
+    writer.init_with_buffer(&buffer);
+
+    writer.write({ 0x01, 0x02, 0x03 })!!;
+    writer.write_byte(0x04)!!;
+
+    char[] data = writer.array_view();
+    io::printfn("Wrote %d bytes into stack buffer", data.len);
+
+    // No destroy() needed -- no heap allocation was made.
+}
+----
+
+=== Building a Binary Protocol Message
+
+[source,c3]
+----
+import std::io;
+
+fn char[] build_message(Allocator allocator, char type, char[] payload)
+{
+    ByteWriter writer;
+    writer.init(allocator);
+
+    // Header: type byte + 2-byte length (big-endian).
+    writer.write_byte(type)!!;
+    ushort len = (ushort)payload.len;
+    writer.write_byte((char)(len >> 8))!!;
+    writer.write_byte((char)(len & 0xFF))!!;
+
+    // Payload.
+    writer.write(payload)!!;
+
+    return writer.array_view();
+}
+
+fn void main()
+{
+    char[] msg = build_message(mem, 0x01, { 0xCA, 0xFE });
+    // msg: { 0x01, 0x00, 0x02, 0xCA, 0xFE }
+    io::printfn("Message: %d bytes", msg.len);
+}
+----
+
+=== Temporary Writer
+
+[source,c3]
+----
+import std::io;
+
+fn char[] encode_temp(int value)
+{
+    ByteWriter writer;
+    writer.tinit();
+
+    // Encode a 32-bit integer as 4 bytes (little-endian).
+    for (int i = 0; i < 4; i++)
+    {
+        writer.write_byte((char)(value & 0xFF))!!;
+        value >>= 8;
+    }
+
+    return writer.array_view();
+}
+
+fn void main()
+{
+    char[] encoded = encode_temp(0x12345678);
+    // encoded: { 0x78, 0x56, 0x34, 0x12 }
+}
+----
+
+== How It Works
+
+* **Dynamic mode** (`init` / `tinit`): The buffer starts empty. On the first write, capacity is allocated (minimum 16 bytes). When a write would exceed capacity, the buffer is reallocated to the next power of 2 that fits.
+* **Fixed mode** (`init_with_buffer`): The buffer is provided externally. No allocator is stored. If a write exceeds the buffer, `ensure_capacity` returns `OUT_OF_SPACE`.
+* **`array_view()`**: Returns `bytes[:index]` -- a slice of the internal buffer up to the current write position. Zero-copy; the slice is invalidated if the writer is modified or destroyed.
+* **`read_from()`**: If the source stream supports `available()`, it reads in chunks of the reported available size. Otherwise, it reads into the remaining buffer space, doubling capacity when less than 16 bytes remain, until the source returns fewer bytes than requested (indicating EOF).
+* **`destroy()`**: Frees the internal buffer via the allocator (if one was used) and zeroes the struct. No-op for fixed-buffer writers.

@@ -1,0 +1,313 @@
+= Parser Combinators
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+C3 doesn't have closures, so you can't directly compose parser functions like in Haskell or Rust. But C3's macros and optionals give you a clean combinator-style API. The key idea: a parser is any expression that returns `String?` and advances a `Parser` state on success. On failure, the position is restored automatically by combinator macros.
+
+== Parser State
+
+The parser holds the input string and a current position. Backtracking is handled by saving and restoring the position.
+
+[source,c3]
+----
+module parser;
+
+faultdef UNEXPECTED, END_OF_INPUT;
+
+struct Parser
+{
+    String input;
+    usz pos;
+}
+
+fn Parser init(String input) => { .input = input };
+
+// Remaining input from current position.
+fn String Parser.rest(&self) => self.input[self.pos..];
+
+// Save/restore for backtracking.
+fn usz Parser.mark(&self) => self.pos;
+fn void Parser.restore(&self, usz mark) { self.pos = mark; }
+
+fn bool Parser.eof(&self) => self.pos >= self.input.len;
+----
+
+== Primitive Parsers
+
+Each primitive advances `pos` on success and returns a fault on failure, leaving `pos` unchanged.
+
+=== `tag` -- match an exact string
+
+[source,c3]
+----
+fn String? Parser.tag(&self, String expected)
+{
+    String r = self.rest();
+    if (r.len < expected.len || r[:expected.len] != expected) return UNEXPECTED?;
+    self.pos += expected.len;
+    return expected;
+}
+----
+
+=== `take_while` -- consume characters matching a predicate
+
+[source,c3]
+----
+fn String? Parser.take_while(&self, fn bool(char) pred)
+{
+    String r = self.rest();
+    usz i = 0;
+    while (i < r.len && pred(r[i])) i++;
+    if (i == 0) return UNEXPECTED?;
+    self.pos += i;
+    return r[:i];
+}
+----
+
+=== `take_until_char` -- consume until a character is found
+
+[source,c3]
+----
+fn String? Parser.take_until_char(&self, char c)
+{
+    String r = self.rest();
+    if (try idx = r.index_of_char(c))
+    {
+        self.pos += idx;
+        return r[:idx];
+    }
+    // Take everything if char not found.
+    self.pos = self.input.len;
+    return r;
+}
+----
+
+=== `skip` -- skip whitespace or a custom set of characters
+
+[source,c3]
+----
+fn void? Parser.skip(&self, String chars = " \t")
+{
+    String r = self.rest();
+    usz i = 0;
+    while (i < r.len && string::char_in_set(r[i], chars)) i++;
+    self.pos += i;
+}
+----
+
+=== `char` -- consume a single character
+
+[source,c3]
+----
+fn char? Parser.char(&self)
+{
+    if (self.eof()) return END_OF_INPUT?;
+    return self.input[self.pos++];
+}
+----
+
+== Combinators
+
+Combinators are macros that compose parser expressions. They handle backtracking automatically.
+
+=== `optional` -- try a parser, return a fallback on failure
+
+[source,c3]
+----
+macro String Parser.optional(&self, #parser, String fallback = "")
+{
+    usz saved = self.mark();
+    if (try result = #parser) return result;
+    self.restore(saved);
+    return fallback;
+}
+----
+
+=== `sequence` -- run a block of parsers, backtrack if any fails
+
+[source,c3]
+----
+macro Parser.sequence(&self, ;@body())
+{
+    usz saved = self.mark();
+    if (catch @body()) { self.restore(saved); return UNEXPECTED?; }
+}
+----
+
+=== `one_of` -- try alternatives in order, return the first success
+
+[source,c3]
+----
+macro String? Parser.one_of(&self, #first, ...)
+{
+    usz saved = self.mark();
+    if (try r = #first) return r;
+    self.restore(saved);
+    $for (var $i = 0; $i < $vacount; $i++)
+        if (try r = $vaarg($i)) return r;
+        self.restore(saved);
+    $endfor
+    return UNEXPECTED?;
+}
+----
+
+== Composition Pattern
+
+The composition pattern in C3 is:
+
+* **Sequencing**: Call parsers one after another with `!`. If any fails, the fault propagates up.
+* **`optional`**: Wraps a parser expression. Catches failures and restores position.
+* **`one_of`**: Tries each alternative in order with automatic backtracking.
+* **`sequence`**: Wraps a block. If anything inside fails, the entire block backtracks.
+
+== Example: Parsing a Content-Type Header
+
+Parse a string like `application/json; charset=utf-8` into its components.
+
+[source,c3]
+----
+import std::io;
+
+struct ContentType
+{
+    String mime_type;
+    String subtype;
+    String charset;
+}
+
+fn bool is_token_char(char c)
+{
+    return (c >= 'a' && c <= 'z')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9')
+        || c == '-' || c == '.' || c == '+';
+}
+
+fn ContentType? parse_content_type(String input)
+{
+    Parser p = parser::init(input);
+
+    // Sequence: type "/" subtype
+    String mime = p.take_while(&is_token_char)!;
+    p.tag("/")!;
+    String subtype = p.take_while(&is_token_char)!;
+
+    // Optional: ";" whitespace key "=" value
+    String charset = p.optional({|
+        p.skip()!;
+        p.tag(";")!;
+        p.skip()!;
+        p.tag("charset")!;
+        p.tag("=")!;
+        return p.take_while(&is_token_char)!;
+    |});
+
+    return {
+        .mime_type = mime,
+        .subtype = subtype,
+        .charset = charset,
+    };
+}
+
+fn void main()
+{
+    if (try ct = parse_content_type("application/json; charset=utf-8"))
+    {
+        io::printfn("type:    %s", ct.mime_type);    // application
+        io::printfn("subtype: %s", ct.subtype);      // json
+        io::printfn("charset: %s", ct.charset);      // utf-8
+    }
+}
+----
+
+== Example: Parsing Alternatives
+
+Use `one_of` to try multiple parsers and return the first match.
+
+[source,c3]
+----
+fn String? parse_boolean(Parser* p)
+{
+    return p.one_of(p.tag("true"), p.tag("false"), p.tag("yes"), p.tag("no"));
+}
+
+fn void main()
+{
+    Parser p = parser::init("false");
+    if (try val = parse_boolean(&p))
+    {
+        io::printfn("Parsed: %s", val);  // Parsed: false
+    }
+}
+----
+
+== Example: Repeated Parsing
+
+Parse a comma-separated list by calling a parser in a loop.
+
+[source,c3]
+----
+fn String[]? parse_csv(Parser* p, Allocator allocator)
+{
+    String[] results;
+    List(<String>) items;
+    items.new_init(allocator: allocator);
+
+    // Parse the first item.
+    String first = p.take_until_char(',')!;
+    items.push(first.trim());
+
+    // Parse remaining ", item" pairs.
+    while (!p.eof())
+    {
+        p.tag(",")!;
+        p.skip()!;
+        String item = p.take_until_char(',')!;
+        items.push(item.trim());
+    }
+
+    return items.to_array();
+}
+
+fn void main()
+{
+    Parser p = parser::init("alice, bob, charlie");
+    if (try names = parse_csv(&p, mem))
+    {
+        foreach (name : names)
+        {
+            io::printfn("  %s", name);
+        }
+        // alice
+        // bob
+        // charlie
+    }
+}
+----
+
+== Summary
+
+[cols="1,2"]
+|===
+| Concept | C3 approach
+
+| Parser
+| A method on `Parser` that returns `Type?` and advances `pos` on success.
+
+| Sequencing
+| Call parsers in order with `!`. Faults propagate automatically.
+
+| Optional
+| `p.optional(\{| ... \|})` -- catches faults and restores position.
+
+| Alternatives
+| `p.one_of(...)` -- tries each parser, backtracks between attempts.
+
+| Backtracking
+| `mark()` / `restore()` -- handled automatically by combinator macros.
+
+| Repetition
+| A `while` loop calling parsers until failure.
+|===

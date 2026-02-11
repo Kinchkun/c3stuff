@@ -1,0 +1,228 @@
+= ZString
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`ZString` is C3's null-terminated string type, designed for interoperability with C. It is a typedef for `char*` -- a pointer to a zero-terminated array of characters.
+
+[source,c3]
+----
+typedef ZString = inline char*;
+----
+
+Use `ZString` when calling C functions that expect `char*` arguments or when receiving strings from C APIs. For general-purpose string handling in C3, prefer xref:String.adoc[String] (`char[]`), which carries its length and does not depend on null termination.
+
+== When to Use ZString
+
+Use `ZString` when:
+
+* You are calling **C library functions** that expect `char*` (e.g., `fopen`, `getenv`, `printf`).
+* You are receiving **string results from C APIs** that return `char*`.
+* You are writing **extern function declarations** that interface with C code.
+
+Prefer other types when:
+
+[cols="1,3"]
+|===
+| Type | When to prefer it
+
+| `String`
+| General string handling in C3. Carries length, supports slicing, searching, splitting.
+
+| `DString`
+| Building or modifying strings dynamically.
+|===
+
+== API Reference
+
+=== Core Methods
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `usz len(self)`
+| Count bytes until the null terminator. O(n).
+
+| `usz char_len(self)`
+| Count UTF-8 codepoints (not bytes). O(n).
+
+| `String str_view(self)`
+| Convert to a `String` slice. Zero-copy -- returns a view from the pointer to the null terminator.
+
+| `bool eq(self, ZString other)` (`==` operator)
+| Compare two ZStrings for equality. Null-safe.
+|===
+
+=== Copying
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `String copy(self, Allocator)`
+| Allocate a `String` copy of this ZString.
+
+| `String tcopy(self)`
+| Copy using the temp allocator.
+|===
+
+=== String to ZString Conversion
+
+These methods are on `String`, not `ZString`, but are the primary way to create a `ZString` from a `String`.
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `ZString String.zstr_copy(self, Allocator)`
+| Allocate a null-terminated copy of a String.
+
+| `ZString String.zstr_tcopy(self)`
+| Null-terminated copy via the temp allocator.
+|===
+
+=== Free Functions
+
+[cols="2,3"]
+|===
+| Function | Description
+
+| `ZString tformat_zstr(String fmt, args...)`
+| Create a formatted, null-terminated string using the temp allocator.
+|===
+
+== Examples
+
+=== Calling C Functions
+
+The most common pattern: convert a `String` to `ZString` with `zstr_tcopy()` for a C call.
+
+[source,c3]
+----
+import libc;
+
+fn void main()
+{
+    String filename = "data.txt";
+
+    // zstr_tcopy() creates a temp null-terminated copy.
+    libc::CFile f = libc::fopen(filename.zstr_tcopy(), "r");
+    if (!f)
+    {
+        libc::perror("fopen");
+        return;
+    }
+    defer libc::fclose(f);
+
+    // ... read from f ...
+}
+----
+
+=== Receiving Strings from C
+
+[source,c3]
+----
+import libc;
+import std::io;
+
+extern fn ZString getenv(ZString name);
+
+fn void main()
+{
+    ZString home = getenv("HOME".zstr_tcopy());
+    if (home)
+    {
+        // Convert to String for C3 string operations.
+        String path = home.str_view();
+        io::printfn("Home directory: %s (length: %d)", path, path.len);
+    }
+    else
+    {
+        io::printn("HOME not set");
+    }
+}
+----
+
+=== Formatting a ZString
+
+[source,c3]
+----
+import libc;
+
+fn void log_message(String level, String msg)
+{
+    // tformat_zstr produces a temp null-terminated formatted string.
+    ZString formatted = string::tformat_zstr("[%s] %s\n", level, msg);
+    libc::fputs(formatted, libc::stderr());
+}
+----
+
+=== Comparing ZStrings
+
+[source,c3]
+----
+fn void main()
+{
+    ZString a = "hello";
+    ZString b = "hello";
+    ZString c = "world";
+
+    assert(a == b);      // true: same content
+    assert(a != c);      // true: different content
+
+    // Null-safe comparison.
+    ZString empty;
+    assert(empty == empty);
+    assert(empty != a);
+}
+----
+
+=== Converting Between String and ZString
+
+[source,c3]
+----
+import std::io;
+
+fn void main()
+{
+    // String to ZString.
+    String s = "hello, world";
+    ZString z = s.zstr_tcopy();
+
+    // ZString back to String.
+    String back = z.str_view();
+    io::printfn("Round-tripped: %s", back);
+
+    // ZString length.
+    io::printfn("Byte length: %d", z.len());
+    io::printfn("Char length: %d", z.char_len());
+}
+----
+
+=== DString to ZString
+
+[source,c3]
+----
+import std::core::dstring;
+import libc;
+
+fn void main()
+{
+    DString builder = dstring::temp("prefix_");
+    builder.append("suffix");
+
+    // Get a null-terminated view directly from the DString.
+    ZString z = builder.zstr_view();
+    libc::puts(z);
+}
+----
+
+== How It Works
+
+* `ZString` is `char*` -- a raw pointer to null-terminated bytes. It has no length field; length is determined by scanning for the null byte.
+* `str_view()` creates a `String` (pointer + length) by scanning for the null terminator once. This is a zero-copy operation -- the returned `String` points to the same memory.
+* `zstr_tcopy()` and `zstr_copy()` allocate new memory, copy the bytes, and append a null terminator.
+* The `==` operator performs a byte-by-byte comparison and handles null pointers safely (two nulls are equal; null vs. non-null is always unequal).
+* `len()` scans for the null byte, making it O(n). If you need the length frequently, convert to `String` once and use `String.len` (which is O(1)).

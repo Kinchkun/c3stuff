@@ -1,0 +1,54 @@
+= Snippets
+:toc:
+:source-highlighter: rouge
+
+== Writing a C `char*` with Length to an OutStream
+
+When you have a `char*` pointer and a length from C, turn the pointer into a `char[]` slice with `[:len]` and pass it to `write()`:
+
+[source,c3]
+----
+fn void write_c_data(OutStream out, char* ptr, usz len)
+{
+    out.write(ptr[:len])!!;
+}
+----
+
+The `ptr[:len]` syntax creates a `char[]` slice from the raw pointer, which is exactly what `OutStream.write(char[] bytes)` takes.
+
+== Creating a ZString from a ByteBuffer
+
+`ByteBuffer` has no `zstr_view()` method and does not guarantee null termination. There are several ways to get a `ZString` from it.
+
+=== Copy into a local buffer
+
+Read the data into a buffer you control, then null-terminate it.
+
+[source,c3]
+----
+char[256] buf;
+usz n = byte_buf.read(&buf)!!;
+buf[n] = 0;
+ZString z = (ZString)&buf;
+----
+
+=== Write a null terminator and access the internal field
+
+Write a zero byte, then point directly into the buffer's internal storage. This avoids a copy but couples you to the struct internals. The `ZString` is only valid until the next read or write.
+
+[source,c3]
+----
+byte_buf.write_byte(0)!!;
+ZString z = (ZString)&byte_buf.bytes[byte_buf.read_idx];
+----
+
+=== Pipe through a DString
+
+Copy the buffer contents into a `DString` and use its `zstr_view()`. Safest approach -- the `DString` owns the data and ensures null termination.
+
+[source,c3]
+----
+DString ds = dstring::temp();
+io::copy(&ds, &byte_buf)!!;
+ZString z = ds.zstr_view();
+----

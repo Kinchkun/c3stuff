@@ -1,0 +1,261 @@
+= ArenaAllocator
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+The `ArenaAllocator` is the simplest arena allocator. It takes a pre-allocated, fixed-size buffer and hands out memory from it using fast pointer bumps. When the buffer is exhausted, further allocations fail with `OUT_OF_MEMORY` -- there is no fallback.
+
+It supports `mark` and reset-to-mark, so you can save a point in the allocation timeline and later roll back to it, freeing everything allocated after the mark. This makes it usable as a stack (push/pop) allocator.
+
+== When to Use ArenaAllocator
+
+Use an `ArenaAllocator` when:
+
+* You have a **known upper bound** on the total memory needed and can supply a buffer that size.
+* You want the **fastest possible allocation** with zero heap interaction.
+* You need **mark/reset-to-mark** to implement nested scopes or stack-like allocation patterns.
+* You want a fully **self-contained allocator** with no backing allocator dependency (the buffer can live on the stack, in a global, or anywhere).
+
+Prefer other allocators when:
+
+[cols="1,3"]
+|===
+| Allocator | When to prefer it
+
+| `DynamicArenaAllocator`
+| You don't know the total memory needed upfront and want the arena to grow automatically.
+
+| `BackedArenaAllocator`
+| You want mark/reset-to-mark but also need a fallback when the initial buffer is exhausted.
+
+| `TempAllocator`
+| You need temporary, thread-local scratch memory. Used via `@pool()` and `tmalloc`.
+|===
+
+== Allocator Comparison
+
+[cols="2,1,1,1,1,1"]
+|===
+| Allocator | Arena | Uses buffer | OOM Fallback | Mark | Reset
+
+| `ArenaAllocator`
+| Yes
+| Yes
+| No
+| Yes
+| Yes (to mark)
+
+| `DynamicArenaAllocator`
+| Yes
+| No
+| Yes
+| No
+| Yes (full)
+
+| `BackedArenaAllocator`
+| Yes
+| Yes
+| Yes
+| Yes
+| Yes (to mark)
+
+| `TempAllocator`
+| Yes
+| No
+| Yes
+| No*
+| No*
+|===
+
+_* TempAllocator uses `@pool()` for mark/reset semantics._
+
+== API
+
+=== `init`
+
+Initialize the arena with a pre-allocated byte buffer.
+
+[source,c3]
+----
+fn ArenaAllocator* ArenaAllocator.init(&self, char[] data)
+----
+
+`data`:: The memory buffer the arena will allocate from. Can be stack memory, a global array, or heap-allocated memory.
+
+Returns a pointer to the initialized allocator (for convenience chaining).
+
+=== `mark`
+
+Save the current allocation state. Returns a value that can later be passed to `reset` to roll back to this point.
+
+[source,c3]
+----
+fn usz ArenaAllocator.mark(&self)
+----
+
+=== `reset`
+
+Reset the arena to a previously saved mark, freeing all memory allocated after that mark.
+
+[source,c3]
+----
+fn void ArenaAllocator.reset(&self, usz mark)
+----
+
+`mark`:: A value previously returned by `mark()`. Pass `0` to reset the entire arena.
+
+=== `clear`
+
+Reset the arena completely, equivalent to `reset(0)`.
+
+[source,c3]
+----
+fn void ArenaAllocator.clear(&self)
+----
+
+=== Allocator Interface
+
+`ArenaAllocator` implements the `Allocator` interface, so it can be passed anywhere an `Allocator` is expected. The interface methods `acquire`, `resize`, and `release` are implemented but typically used indirectly through standard allocation functions.
+
+== Examples
+
+=== Basic Usage with a Stack Buffer
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    // Use a stack-allocated buffer.
+    char[4096] buffer;
+    ArenaAllocator arena;
+    arena.init(&buffer);
+
+    // Allocate from the arena.
+    int* value = allocator::alloc(&arena, int)!!;
+    *value = 42;
+    io::printfn("Value: %d", *value);
+
+    int[] numbers = allocator::alloc_array(&arena, int, 100)!!;
+    numbers[0] = 1;
+
+    // Reset everything when done -- no individual frees needed.
+    arena.clear();
+}
+----
+
+=== Mark and Reset
+
+Use `mark` and `reset` to implement nested allocation scopes. Inner allocations are freed when you reset to the outer mark.
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    char[8192] buffer;
+    ArenaAllocator arena;
+    arena.init(&buffer);
+
+    // Allocate some persistent data.
+    int* keep = allocator::alloc(&arena, int)!!;
+    *keep = 100;
+
+    // Save a mark before temporary work.
+    usz saved = arena.mark();
+
+    // Temporary allocations.
+    int[] scratch = allocator::alloc_array(&arena, int, 256)!!;
+    foreach (i, &val : scratch) *val = (int)i;
+    io::printfn("scratch[5] = %d", scratch[5]);
+
+    // Roll back -- scratch memory is released, but 'keep' is preserved.
+    arena.reset(saved);
+
+    // 'keep' is still valid.
+    io::printfn("keep = %d", *keep);
+
+    arena.clear();
+}
+----
+
+=== Scoped Allocator with `mem::@scoped`
+
+[source,c3]
+----
+import std::io;
+import std::core::mem;
+
+fn void main()
+{
+    char[4096] buffer;
+    ArenaAllocator arena;
+    arena.init(&buffer);
+
+    mem::@scoped(&arena)
+    {
+        // All allocations in this block (and called functions)
+        // use the arena as the current allocator.
+        io::printfn("Hello from scoped arena");
+    };
+
+    arena.clear();
+}
+----
+
+=== Using as a Function Parameter
+
+[source,c3]
+----
+import std::collections::list;
+
+fn void main()
+{
+    char[4096] buffer;
+    ArenaAllocator arena;
+    arena.init(&buffer);
+
+    List(<int>) my_list;
+    my_list.new_init(16, &arena);
+
+    my_list.push(10);
+    my_list.push(20);
+    my_list.push(30);
+
+    // No individual frees needed; just clear the arena.
+    arena.clear();
+}
+----
+
+=== Inline Initialization with `wrap`
+
+[source,c3]
+----
+import std::core::mem::allocator;
+
+fn void main()
+{
+    char[2048] buffer;
+    ArenaAllocator* arena = allocator::wrap(&buffer);
+
+    // Use arena...
+    arena.clear();
+}
+----
+
+== How It Works
+
+The `ArenaAllocator` is the simplest possible arena:
+
+1. It holds a reference to a fixed byte buffer and a `used` counter.
+2. Each allocation bumps `used` forward by the aligned size plus a small header (`usz` storing the allocation size).
+3. `release()` can only reclaim space if the freed pointer is the most recent allocation (stack-like LIFO freeing).
+4. `mark()` snapshots `used`; `reset(mark)` restores it, effectively freeing everything allocated after the mark.
+5. If the buffer is exhausted, `acquire()` returns `OUT_OF_MEMORY` -- there is no fallback.
+
+This makes it ideal for predictable, bounded workloads where you know the memory ceiling ahead of time.

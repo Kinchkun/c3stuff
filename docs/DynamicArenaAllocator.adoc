@@ -1,0 +1,244 @@
+= DynamicArenaAllocator
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+The `DynamicArenaAllocator` is an arena-style allocator that grows dynamically by allocating additional pages from a backing allocator. Unlike a fixed `ArenaAllocator`, it will never run out of memory as long as the backing allocator can provide more pages. Unlike the `BackedArenaAllocator`, it retains arena allocation characteristics even when spilling beyond the first page.
+
+It supports `reset()` (which releases all pages for reuse) but does **not** support `mark`/reset-to-mark. If you need multiple save points, use `BackedArenaAllocator` instead.
+
+== When to Use DynamicArenaAllocator
+
+Use a `DynamicArenaAllocator` when:
+
+* You need arena-style (bump) allocation but **don't know the total memory needed** upfront.
+* You want to allocate many objects and then **free them all at once** with `reset()` or `free()`.
+* You are processing data in **repeated cycles** (e.g., per-frame, per-request, per-iteration) where each cycle can reset the arena.
+* You want better performance than individual `malloc`/`free` calls for many small, short-lived allocations.
+
+Prefer other allocators when:
+
+[cols="1,3"]
+|===
+| Allocator | When to prefer it
+
+| `ArenaAllocator`
+| You have a fixed-size buffer and know the upper bound of memory usage. Supports `mark`/reset-to-mark.
+
+| `BackedArenaAllocator`
+| You need multiple save points via `mark`/reset-to-mark, with fallback to a backing allocator.
+
+| `TempAllocator`
+| You need temporary, thread-local scratch memory. Used via `@pool()` and `tmalloc`.
+|===
+
+== Allocator Comparison
+
+[cols="2,1,1,1,1,1"]
+|===
+| Allocator | Arena | Uses buffer | OOM Fallback | Mark | Reset
+
+| `ArenaAllocator`
+| Yes
+| Yes
+| No
+| Yes
+| Yes (to mark)
+
+| `DynamicArenaAllocator`
+| Yes
+| No
+| Yes
+| No
+| Yes (full)
+
+| `BackedArenaAllocator`
+| Yes
+| Yes
+| Yes
+| Yes
+| Yes (to mark)
+
+| `TempAllocator`
+| Yes
+| No
+| Yes
+| No*
+| No*
+|===
+
+_* TempAllocator uses `@pool()` for mark/reset semantics._
+
+== API
+
+=== `init`
+
+Initialize the allocator with a backing allocator and a page size.
+
+[source,c3]
+----
+fn void DynamicArenaAllocator.init(&self, Allocator allocator, usz page_size)
+----
+
+`page_size`:: The size of each page allocated from the backing allocator. Must be `>= 128`.
+`allocator`:: The backing allocator used to allocate pages (typically `mem`, the default heap allocator).
+
+=== `reset`
+
+Reset the allocator, releasing all current allocations. Pages are kept in an internal pool for reuse on subsequent allocations, avoiding repeated calls to the backing allocator.
+
+[source,c3]
+----
+fn void DynamicArenaAllocator.reset(&self)
+----
+
+=== `free`
+
+Free all memory, including all active and pooled pages, back to the backing allocator. The allocator must not be used after calling `free()` unless re-initialized.
+
+[source,c3]
+----
+fn void DynamicArenaAllocator.free(&self)
+----
+
+=== Allocator Interface
+
+`DynamicArenaAllocator` implements the `Allocator` interface, so it can be passed anywhere an `Allocator` is expected. The interface methods `acquire`, `resize`, and `release` are implemented but typically used indirectly through standard allocation functions like `allocator::malloc`, `allocator::calloc`, `allocator::realloc`, and `allocator::free`.
+
+== Examples
+
+=== Basic Usage
+
+[source,c3]
+----
+import std::io;
+import std::core::mem::allocator;
+
+fn void main()
+{
+    // Create and initialize with 4096-byte pages.
+    DynamicArenaAllocator arena;
+    arena.init(mem, 4096);
+
+    // Allocate memory from the arena.
+    int* value = allocator::alloc(arena, int)!!;
+    *value = 42;
+    io::printfn("Value: %d", *value);
+
+    // Allocate an array.
+    int[] numbers = allocator::alloc_array(arena, int, 100)!!;
+    numbers[0] = 1;
+
+    // Free all memory when done.
+    arena.free();
+}
+----
+
+=== Scoped Allocator with `mem::@scoped`
+
+Use `mem::@scoped` to temporarily set the arena as the current allocator within a block. Any allocations inside the block (including those in called functions) will use the arena.
+
+[source,c3]
+----
+import std::io;
+import std::core::mem;
+
+fn String process(String input)
+{
+    // This allocation uses whatever allocator is current.
+    return string::tformat("processed: %s", input);
+}
+
+fn void main()
+{
+    DynamicArenaAllocator arena;
+    arena.init(mem, 4096);
+
+    mem::@scoped(&arena)
+    {
+        String result = process("hello");
+        io::printfn("%s", result);
+        // 'result' is valid here, allocated from the arena.
+    };
+
+    // After the scope, all arena memory can be reset.
+    arena.free();
+}
+----
+
+=== Iterative Processing with `reset`
+
+The most common pattern: process items in a loop, resetting the arena between iterations to reuse memory without returning it to the heap.
+
+[source,c3]
+----
+import std::io;
+import std::core::mem;
+
+fn void main()
+{
+    String[] urls = { "example.com", "test.org", "demo.net" };
+
+    DynamicArenaAllocator arena;
+    arena.init(mem, 1024);
+
+    foreach (url : urls)
+    {
+        mem::@scoped(&arena)
+        {
+            // All allocations in this block use the arena.
+            io::printfn("Processing: %s", url);
+            // ... do work that allocates memory ...
+        };
+        // Reset the arena for the next iteration.
+        // Pages are kept for reuse, not returned to the heap.
+        arena.reset();
+    }
+
+    // Release all pages back to the backing allocator.
+    arena.free();
+}
+----
+
+=== Using as a Function Parameter
+
+Since `DynamicArenaAllocator` implements the `Allocator` interface, pass it to any function that accepts an `Allocator`.
+
+[source,c3]
+----
+import std::collections::list;
+
+fn void main()
+{
+    DynamicArenaAllocator arena;
+    arena.init(mem, 4096);
+
+    // Use the arena as the allocator for a list.
+    List(<int>) my_list;
+    my_list.new_init(16, &arena);
+
+    my_list.push(1);
+    my_list.push(2);
+    my_list.push(3);
+
+    // No need to free the list individually; free the arena.
+    arena.free();
+}
+----
+
+== How It Works
+
+Internally, the `DynamicArenaAllocator` maintains a linked list of pages:
+
+1. On the first allocation, a page of `page_size` bytes is allocated from the backing allocator.
+2. Subsequent allocations bump a pointer within the current page (classic arena/bump allocation).
+3. When a page is full, a new page is allocated. If the requested size exceeds `page_size`, the page size is increased to fit.
+4. On `reset()`, all pages are moved to an internal "unused" pool. The next allocation cycle reuses pooled pages before allocating new ones.
+5. On `free()`, all pages (active and pooled) are returned to the backing allocator.
+
+This design means:
+
+* Allocations are very fast (pointer bump).
+* Individual `release()` calls are mostly no-ops (only the most recent allocation can reclaim space).
+* Memory is efficiently reused across reset cycles without repeated heap allocation.

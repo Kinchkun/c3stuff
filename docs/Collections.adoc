@@ -1,0 +1,692 @@
+= Collections
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+C3 provides a rich set of generic collection types in `std::collections`. All heap-allocated collections follow the same patterns:
+
+* `init(allocator, ...)` -- initialize with a specific allocator
+* `tinit(...)` -- initialize with the temp allocator
+* `free()` -- release memory
+* `len()` -- element count (also usable as `|collection|`)
+* Operator overloads: `[]` for get, `[]=` for set, `&[]` for get-by-reference
+
+== Quick Reference
+
+[cols="2,2,3"]
+|===
+| Type | Module | Purpose
+
+| `List(<Type>)`
+| `std::collections::list`
+| Dynamic array (like C++ `vector`)
+
+| `LinkedList(<Type>)`
+| `std::collections::linkedlist`
+| Doubly-linked list
+
+| `ElasticArray(<Type, MAX>)`
+| `std::collections::elastic_array`
+| Fixed-capacity array on the stack
+
+| `HashMap(<Key, Value>)`
+| `std::collections::map`
+| Hash table (unordered)
+
+| `LinkedHashMap(<Key, Value>)`
+| `std::collections::map`
+| Hash table preserving insertion order
+
+| `HashSet(<Value>)`
+| `std::collections::set`
+| Hash-based set with set operations
+
+| `LinkedHashSet(<Value>)`
+| `std::collections::set`
+| Set preserving insertion order
+
+| `EnumMap(<Enum, Value>)`
+| `std::collections::enummap`
+| Enum-indexed array (no heap, no hashing)
+
+| `EnumSet(<Enum>)`
+| `std::collections::enumset`
+| Enum-based bitset (no heap)
+
+| `BitSet(<SIZE>)`
+| `std::collections::bitset`
+| Fixed-size bitset (no heap)
+
+| `GrowableBitSet(<Type>)`
+| `std::collections::growablebitset`
+| Dynamic bitset
+
+| `PriorityQueue(<Type>)`
+| `std::collections::priorityqueue`
+| Min-heap priority queue
+
+| `PriorityQueueMax(<Type>)`
+| `std::collections::priorityqueue`
+| Max-heap priority queue
+
+| `RingBuffer(<Type>)`
+| `std::collections::ringbuffer`
+| Fixed-size circular buffer (no heap)
+
+| `Pair(<A, B>)`
+| `std::collections::pair`
+| 2-tuple
+
+| `Triple(<A, B, C>)`
+| `std::collections::triple`
+| 3-tuple
+
+| `Maybe(<Type>)`
+| `std::collections::maybe`
+| Optional value container
+
+| `Object`
+| `std::collections::object`
+| Dynamic JSON-like object
+|===
+
+== List
+
+A dynamic array that grows as elements are added. The most commonly used collection.
+
+[source,c3]
+----
+import std::collections::list;
+
+alias IntList = List(<int>);
+
+fn void main()
+{
+    IntList list;
+    list.init(mem);
+    defer list.free();
+
+    list.push(10);
+    list.push(20);
+    list.push(30);
+
+    io::printfn("Length: %d", list.len());  // 3
+    io::printfn("First: %d", list[0]);      // 10
+
+    // Pop from end.
+    int last = list.pop()!!;  // 30
+
+    // Iterate.
+    foreach (val : list)
+    {
+        io::printfn("%d", val);
+    }
+}
+----
+
+=== Key Methods
+
+[cols="2,3"]
+|===
+| Method | Description
+
+| `push(element)` | Add to end
+| `pop()` | Remove and return from end
+| `push_front(element)` | Add to front
+| `pop_first()` | Remove and return from front
+| `insert_at(index, element)` | Insert at index
+| `remove_at(index)` | Remove at index
+| `get(index)` / `[]` | Get element at index
+| `get_ref(index)` / `&[]` | Get reference at index
+| `set_at(index, value)` / `[]=` | Set element at index
+| `first()` / `last()` | Get first or last element
+| `contains(value)` | Check membership
+| `index_of(value)` | Find first index
+| `reverse()` | Reverse in place
+| `clear()` | Remove all elements
+| `push_all(array)` | Append array of elements
+| `add_all(other_list)` | Append another list
+| `remove_if(predicate)` | Remove elements matching predicate
+| `retain_if(predicate)` | Keep only elements matching predicate
+| `array_view()` | Get a slice view of the elements
+| `to_array(allocator)` | Copy to a new array
+| `swap(i, j)` | Swap two elements
+|===
+
+=== Initializing from an Array
+
+[source,c3]
+----
+IntList list;
+list.init_with_array(mem, { 1, 2, 3, 4, 5 });
+defer list.free();
+
+assert(list.len() == 5);
+assert(list[2] == 3);
+----
+
+=== Filtering
+
+[source,c3]
+----
+IntList list;
+list.init_with_array(mem, { 1, 2, 3, 4, 5, 6 });
+defer list.free();
+
+// Remove even numbers.
+list.remove_if(fn bool(int* val) => *val % 2 == 0);
+// list: [1, 3, 5]
+----
+
+== LinkedList
+
+A doubly-linked list. Efficient for frequent insertions and removals at both ends.
+
+[source,c3]
+----
+import std::collections::linkedlist;
+
+alias StringLinkedList = LinkedList(<String>);
+
+fn void main()
+{
+    StringLinkedList list;
+    list.init(mem);
+    defer list.free();
+
+    list.push("world");
+    list.push_front("hello");
+    list.push("!");
+
+    foreach (val : list)
+    {
+        io::printf("%s ", val);
+    }
+    // hello world !
+
+    list.pop_first()!!;   // remove "hello"
+    list.pop()!!;          // remove "!"
+}
+----
+
+== ElasticArray
+
+A stack-allocated, bounded list with a compile-time maximum size. No heap allocation.
+
+[source,c3]
+----
+import std::collections::elastic_array;
+
+alias SmallList = ElasticArray(<int, 8>);
+
+fn void main()
+{
+    SmallList arr;
+    arr.push(1);
+    arr.push(2);
+    arr.push(3);
+
+    io::printfn("Length: %d", arr.len());  // 3
+
+    // Capacity is fixed at 8. Pushing beyond that is a contract violation.
+    // Use push_try() for a safe fallible push.
+    if (catch arr.push_try(99))
+    {
+        io::printn("Full!");
+    }
+
+    foreach (val : arr.array_view())
+    {
+        io::printfn("%d", val);
+    }
+}
+----
+
+== HashMap
+
+A hash table mapping keys to values. Keys must implement a `.hash()` method.
+
+[source,c3]
+----
+import std::collections::map;
+
+alias StringIntMap = HashMap(<String, int>);
+
+fn void main()
+{
+    StringIntMap m;
+    m.init(mem);
+    defer m.free();
+
+    m.set("alice", 1);
+    m.set("bob", 2);
+    m["charlie"] = 3;          // operator syntax
+
+    int val = m.get("alice")!!; // 1
+    int val2 = m["bob"]!!;      // 2
+
+    if (m.has_key("charlie"))
+    {
+        io::printn("charlie exists");
+    }
+
+    // Iterate over all entries.
+    m.@each(; String key, int value)
+    {
+        io::printfn("%s => %d", key, value);
+    };
+
+    m.remove("bob")!!;
+}
+----
+
+=== Initialize with Key-Value Pairs
+
+[source,c3]
+----
+StringIntMap m;
+m.init_with_key_values(mem, "a", 1, "b", 2, "c", 3);
+defer m.free();
+----
+
+=== Get or Create
+
+[source,c3]
+----
+// Get a reference to the value, creating a zero-initialized entry if missing.
+int* ref = m.get_or_create_ref("new_key");
+*ref = 42;
+----
+
+=== Extracting Keys and Values
+
+[source,c3]
+----
+String[] keys = m.tkeys();
+int[] values = m.tvalues();
+----
+
+== LinkedHashMap
+
+Identical API to `HashMap`, but iteration order matches insertion order.
+
+[source,c3]
+----
+import std::collections::map;
+
+alias OrderedMap = LinkedHashMap(<String, int>);
+
+fn void main()
+{
+    OrderedMap m;
+    m.init(mem);
+    defer m.free();
+
+    m.set("first", 1);
+    m.set("second", 2);
+    m.set("third", 3);
+
+    // Iteration preserves insertion order.
+    m.@each(; String key, int value)
+    {
+        io::printfn("%s => %d", key, value);
+    };
+    // first => 1
+    // second => 2
+    // third => 3
+}
+----
+
+== HashSet
+
+A hash-based set. Values must implement a `.hash()` method. Supports set-theoretic operations.
+
+[source,c3]
+----
+import std::collections::set;
+
+alias StringSet = HashSet(<String>);
+
+fn void main()
+{
+    StringSet s;
+    s.init(mem);
+    defer s.free();
+
+    s.add("apple");
+    s.add("banana");
+    s.add("apple");    // duplicate, ignored
+
+    io::printfn("Size: %d", s.len());            // 2
+    io::printfn("Has apple: %s", s.contains("apple"));  // true
+
+    s.remove("banana");
+}
+----
+
+=== Set Operations
+
+[source,c3]
+----
+StringSet a;
+a.init_with_values(mem, "x", "y", "z");
+defer a.free();
+
+StringSet b;
+b.init_with_values(mem, "y", "z", "w");
+defer b.free();
+
+StringSet u = a.tset_union(b);          // { x, y, z, w }
+StringSet i = a.tintersection(b);       // { y, z }
+StringSet d = a.tdifference(b);         // { x }
+StringSet sd = a.tsymmetric_difference(b); // { x, w }
+
+bool sub = a.is_subset(b);             // false
+----
+
+== LinkedHashSet
+
+Identical API to `HashSet`, but iteration order matches insertion order. Same set operations are available.
+
+== EnumMap
+
+An enum-indexed array. No hashing, no heap allocation. O(1) access by enum value.
+
+[source,c3]
+----
+import std::collections::enummap;
+
+enum Direction { NORTH, SOUTH, EAST, WEST }
+alias DirNames = EnumMap(<Direction, String>);
+
+fn void main()
+{
+    DirNames names;
+    names[NORTH] = "North";
+    names[SOUTH] = "South";
+    names[EAST]  = "East";
+    names[WEST]  = "West";
+
+    io::printfn("Going %s", names[EAST]);  // Going East
+}
+----
+
+== EnumSet
+
+A bitset indexed by enum values. No heap allocation. Efficient set operations via bitwise ops.
+
+[source,c3]
+----
+import std::collections::enumset;
+
+enum Permission { READ, WRITE, EXECUTE }
+alias PermissionSet = EnumSet(<Permission>);
+
+fn void main()
+{
+    PermissionSet perms;
+    perms.add(Permission.READ);
+    perms.add(Permission.WRITE);
+
+    if (perms.has(Permission.READ))
+    {
+        io::printn("Can read");
+    }
+
+    perms.remove(Permission.WRITE);
+
+    // Set operations.
+    PermissionSet other;
+    other.add(Permission.READ);
+    other.add(Permission.EXECUTE);
+
+    PermissionSet combined = perms | other;   // union
+    PermissionSet common = perms & other;     // intersection
+}
+----
+
+== BitSet
+
+A fixed-size bitset. The size in bits is a compile-time constant. No heap allocation.
+
+[source,c3]
+----
+import std::collections::bitset;
+
+alias Flags = BitSet(<256>);
+
+fn void main()
+{
+    Flags flags;
+    flags.set(0);
+    flags.set(42);
+    flags.set(255);
+
+    io::printfn("Bit 42: %s", flags[42]);          // true
+    io::printfn("Bit 1: %s", flags[1]);             // false
+    io::printfn("Cardinality: %d", flags.cardinality()); // 3
+
+    flags.unset(42);
+
+    // Bitwise operations.
+    Flags other;
+    other.set(0);
+    Flags result = flags & other;  // intersection
+}
+----
+
+== GrowableBitSet
+
+A dynamically growing bitset. Grows automatically when setting bits beyond current capacity.
+
+[source,c3]
+----
+import std::collections::growablebitset;
+
+alias DynBits = GrowableBitSet(<uint>);
+
+fn void main()
+{
+    DynBits bits;
+    bits.init(mem);
+    defer bits.free();
+
+    bits.set(1000);   // grows automatically
+    bits.set(5);
+
+    io::printfn("Bit 1000: %s", bits[1000]);  // true
+    io::printfn("Bit 999: %s", bits[999]);     // false
+}
+----
+
+== PriorityQueue
+
+A binary heap. `PriorityQueue` is a min-heap (smallest first), `PriorityQueueMax` is a max-heap.
+
+[source,c3]
+----
+import std::collections::priorityqueue;
+
+alias MinQueue = PriorityQueue(<int>);
+
+fn void main()
+{
+    MinQueue q;
+    q.init(mem);
+    defer q.free();
+
+    q.push(30);
+    q.push(10);
+    q.push(20);
+
+    io::printfn("Min: %d", q.first()!!);   // 10
+
+    int a = q.pop()!!;  // 10
+    int b = q.pop()!!;  // 20
+    int c = q.pop()!!;  // 30
+}
+----
+
+For a max-heap, use `PriorityQueueMax(<int>)` instead.
+
+== RingBuffer
+
+A fixed-size circular buffer. The type parameter must be an array type that defines the capacity.
+
+[source,c3]
+----
+import std::collections::ringbuffer;
+
+alias CharRing = RingBuffer(<char[16]>);
+
+fn void main()
+{
+    CharRing ring;
+    ring.init();
+
+    ring.push('a');
+    ring.push('b');
+    ring.push('c');
+
+    io::printfn("First: %c", ring[0]);  // a
+
+    char val = ring.pop()!!;  // c (from end)
+}
+----
+
+== Pair and Triple
+
+Simple 2-tuples and 3-tuples with unpacking support.
+
+[source,c3]
+----
+import std::collections::pair;
+import std::collections::triple;
+
+alias StringIntPair = Pair(<String, int>);
+alias IntTriple = Triple(<int, int, int>);
+
+fn void main()
+{
+    StringIntPair p = { "age", 30 };
+    io::printfn("%s: %d", p.first, p.second);
+
+    // Unpack into variables.
+    String name;
+    int value;
+    p.unpack(&name, &value);
+
+    // Triple.
+    IntTriple t = { 1, 2, 3 };
+    int a, b, c;
+    t.unpack(&a, &b, &c);
+
+    // Equality (if element types support it).
+    assert(p == { "age", 30 });
+}
+----
+
+== Maybe
+
+An optional value container. Wraps a value that may or may not be present.
+
+[source,c3]
+----
+import std::collections::maybe;
+
+alias OptInt = Maybe(<int>);
+
+fn void main()
+{
+    OptInt m = maybe::value(42);
+    io::printfn("Value: %d", m.get()!!);  // 42
+
+    OptInt empty = maybe::EMPTY;
+    if (catch empty.get())
+    {
+        io::printn("No value");
+    }
+
+    m.reset();      // clear
+    m.set(100);     // set new value
+}
+----
+
+== Object
+
+A dynamic, JSON-like value type that can hold null, bool, int, float, string, array, or map values. Useful for working with structured data of unknown shape.
+
+[source,c3]
+----
+import std::collections::object;
+
+fn void main()
+{
+    Object* obj = object::new_obj(mem);
+    defer obj.free();
+
+    obj.set("name", object::new_string("Alice", mem));
+    obj.set("age", object::new_int(30, mem));
+
+    String name = obj.get_string("name")!!;
+    long age = obj.get_long("age")!!;
+
+    io::printfn("%s is %d", name, age);
+}
+----
+
+== Common Patterns
+
+=== Allocator Choice
+
+All heap-allocated collections accept an `Allocator` on init. Use `mem` for the default heap, or `tmem` (via `tinit`) for temporary allocations.
+
+[source,c3]
+----
+// Heap allocated -- must call free().
+IntList heap_list;
+heap_list.init(mem);
+defer heap_list.free();
+
+// Temp allocated -- freed automatically at end of @pool or scope.
+IntList temp_list;
+temp_list.tinit();
+----
+
+=== Iteration
+
+[source,c3]
+----
+// foreach on lists, linked lists, elastic arrays.
+foreach (val : list)
+{
+    io::printfn("%d", val);
+}
+
+// @each on maps and sets.
+map.@each(; String key, int value)
+{
+    io::printfn("%s: %d", key, value);
+};
+
+set.@each(; String val)
+{
+    io::printfn("%s", val);
+};
+----
+
+=== Stack-Allocated vs Heap-Allocated
+
+[cols="1,1,2"]
+|===
+| No heap | Heap-allocated | Notes
+
+| `ElasticArray` | `List` | Same API, bounded vs growable
+| `EnumMap` | `HashMap` | Enum keys vs general keys
+| `EnumSet` | `HashSet` | Enum values vs general values
+| `BitSet` | `GrowableBitSet` | Fixed bits vs dynamic bits
+| `RingBuffer` | -- | Always fixed-size
+| `Pair` / `Triple` | -- | Always stack-allocated
+| `Maybe` | -- | Always stack-allocated
+|===
