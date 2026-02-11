@@ -1,0 +1,254 @@
+= mem::@scoped
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+`mem::@scoped` temporarily replaces the current thread's default allocator (`mem`) with a different allocator for the duration of a block. When the block exits, the original allocator is restored automatically.
+
+[source,c3]
+----
+macro void @scoped(Allocator allocator; @body())
+{
+    Allocator old_allocator = allocator::thread_allocator;
+    allocator::thread_allocator = allocator;
+    defer allocator::thread_allocator = old_allocator;
+    @body();
+}
+----
+
+This is the mechanism behind C3's allocator-scoping pattern: any code inside the block -- including called functions -- that allocates via `mem` (the default allocator) will use the scoped allocator instead.
+
+== How `mem` Works
+
+`mem` is a built-in alias for the thread-local allocator:
+
+[source,c3]
+----
+alias mem @builtin = thread_allocator;
+----
+
+By default, `mem` points to the heap allocator. `@scoped` swaps it, so all allocations through `mem` are redirected to your chosen allocator for the duration of the block.
+
+== Basic Usage
+
+[source,c3]
+----
+import std::io;
+import std::core::mem;
+
+fn void main()
+{
+    DynamicArenaAllocator arena;
+    arena.init(mem, 4096);
+    defer arena.free();
+
+    mem::@scoped(&arena)
+    {
+        // Everything allocated via 'mem' in here uses the arena.
+        String s = string::tformat("hello %s", "world");
+        io::printn(s);
+    };
+
+    // 'mem' is back to the heap allocator here.
+}
+----
+
+== Why Use @scoped
+
+Without `@scoped`, you must pass an allocator explicitly to every function:
+
+[source,c3]
+----
+// Explicit allocator threading -- verbose.
+String result = my_string.copy(&arena);
+String[] parts = data.split(&arena, ",");
+----
+
+With `@scoped`, functions that use `mem` internally pick up the scoped allocator automatically:
+
+[source,c3]
+----
+mem::@scoped(&arena)
+{
+    // These use 'mem' internally, which now points to the arena.
+    String result = my_string.copy(mem);
+    String[] parts = data.split(mem, ",");
+};
+----
+
+This is especially useful for third-party or library code that allocates via `mem` -- you control where its allocations go without modifying the library.
+
+== Common Patterns
+
+=== Arena Per Iteration
+
+Reset an arena between loop iterations. Each iteration's allocations are discarded cleanly.
+
+[source,c3]
+----
+fn void main()
+{
+    DynamicArenaAllocator arena;
+    arena.init(mem, 1024);
+    defer arena.free();
+
+    String[] items = { "alpha", "bravo", "charlie" };
+
+    foreach (item : items)
+    {
+        mem::@scoped(&arena)
+        {
+            String upper = item.to_upper_copy(mem);
+            io::printfn("Processing: %s", upper);
+        };
+        arena.reset();
+    }
+}
+----
+
+=== Fixed-Buffer Allocation (No Heap)
+
+Use an `ArenaAllocator` with a stack buffer to avoid heap allocation entirely.
+
+[source,c3]
+----
+fn void main()
+{
+    char[4096] buffer;
+    ArenaAllocator arena;
+    arena.init(&buffer);
+
+    mem::@scoped(&arena)
+    {
+        // All allocations come from the stack buffer.
+        String greeting = string::tformat("Hello, %s!", "world");
+        io::printn(greeting);
+    };
+
+    arena.clear();
+}
+----
+
+=== Nesting
+
+Scopes can be nested. Each `@scoped` saves and restores the previous allocator.
+
+[source,c3]
+----
+fn void main()
+{
+    DynamicArenaAllocator outer;
+    outer.init(mem, 4096);
+    defer outer.free();
+
+    DynamicArenaAllocator inner;
+    inner.init(mem, 1024);
+    defer inner.free();
+
+    mem::@scoped(&outer)
+    {
+        // Allocations here use 'outer'.
+        String a = "hello".copy(mem);
+
+        mem::@scoped(&inner)
+        {
+            // Allocations here use 'inner'.
+            String b = "world".copy(mem);
+        };
+
+        // Back to 'outer' here.
+    };
+
+    // Back to the heap allocator here.
+}
+----
+
+=== Scoped Tracking
+
+Use `@scoped` with a `TrackingAllocator` to monitor allocations in a section of code. There is also a convenience macro `@report_heap_allocs_in_scope` that does this automatically:
+
+[source,c3]
+----
+fn void main()
+{
+    mem::@report_heap_allocs_in_scope()
+    {
+        // All allocations here are tracked and reported.
+        String s = "hello".copy(mem);
+        // ...
+    };
+    // Prints allocation stats when the scope exits.
+}
+----
+
+== Related Macros
+
+[cols="2,3"]
+|===
+| Macro | Description
+
+| `mem::@scoped(allocator)`
+| Replace `mem` with a custom allocator for the block.
+
+| `@pool(reserve = 0)`
+| Push a new temp allocator mark. Allocations via `tmem`/`tmalloc` inside the block are freed on exit.
+
+| `mem::@stack_mem($size)`
+| Create a stack-backed `OnStackAllocator` of `$size` bytes and pass it to the block.
+
+| `mem::@stack_pool($size)`
+| Same as `@stack_mem` but also scopes `mem` to the stack allocator.
+
+| `mem::@report_heap_allocs_in_scope()`
+| Wrap a `TrackingAllocator` around `mem` for the block and print allocation stats on exit.
+|===
+
+=== @pool
+
+`@pool` is for the temp allocator (`tmem`), not `mem`. It marks the current temp allocator state and restores it on exit, freeing all temp allocations made inside the block:
+
+[source,c3]
+----
+@pool()
+{
+    // Temp allocations here are freed when the block exits.
+    String s = string::tformat("temp: %d", 42);
+    io::printn(s);
+};
+// s is no longer valid here.
+----
+
+=== @stack_mem
+
+`@stack_mem` creates a stack-allocated arena and passes it to the block as a parameter:
+
+[source,c3]
+----
+mem::@stack_mem(1024; Allocator stack_alloc)
+{
+    // stack_alloc is an arena backed by 1024 bytes on the stack.
+    String s = "hello".copy(stack_alloc);
+    io::printn(s);
+};
+----
+
+=== @stack_pool
+
+`@stack_pool` combines `@stack_mem` and `@scoped` -- it creates a stack-backed allocator and sets it as `mem`:
+
+[source,c3]
+----
+mem::@stack_pool(2048)
+{
+    // 'mem' is now a stack-backed arena of 2048 bytes.
+    String s = "hello".copy(mem);
+    io::printn(s);
+};
+----
+
+== Lifetime Rules
+
+* Memory allocated inside `@scoped` from the scoped allocator is only valid as long as the allocator is alive -- not just the scope.
+* `@scoped` only affects `mem`. If you pass an allocator explicitly (e.g., `string.copy(some_other_allocator)`), that is not affected.
+* `@scoped` is thread-local. Each thread has its own `mem`, so scoping in one thread does not affect another.
