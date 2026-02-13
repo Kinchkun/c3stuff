@@ -1,0 +1,533 @@
+= HTTP Middleware
+:toc:
+:source-highlighter: rouge
+
+== Overview
+
+The HTTP client supports a middleware pipeline that allows intercepting, modifying, and short-circuiting requests and responses. This enables cross-cutting concerns like retry logic, caching, authentication, and rate limiting to be implemented as composable, reusable components.
+
+== Architecture
+
+The middleware system follows the **chain of responsibility** pattern. Each middleware wraps the next, forming a pipeline:
+
+[source]
+----
+Request → [Retry] → [RateLimit] → [Cache] → [Auth] → HTTP Call
+                                                         ↓
+Response ← [Retry] ← [RateLimit] ← [Cache] ← [Auth] ← Response
+----
+
+Each middleware can:
+
+* Modify the request before passing it down the chain
+* Short-circuit and return a response early (e.g., cache hit)
+* Modify the response on the way back up
+* Retry the entire chain (e.g., after refreshing an auth token)
+* Handle or transform errors
+
+== Core Types
+
+=== Middleware Interface
+
+The `Middleware` interface defines a single method that receives the request and a chain object to call the next handler.
+
+[source,c3]
+----
+interface Middleware {
+    fn HttpResponse!? handle(&self, HttpRequest* request, MiddlewareChain* chain);
+}
+----
+
+=== MiddlewareChain
+
+The chain is passed to each middleware and provides the `proceed()` method to invoke the next middleware or the final HTTP call.
+
+[source,c3]
+----
+struct MiddlewareChain {
+    Middleware[] middlewares;
+    usz index;
+    HttpClient* client;
+    Allocator allocator;
+}
+
+fn HttpResponse!? MiddlewareChain.proceed(&self, HttpRequest* request) {
+    if (self.index >= self.middlewares.len) {
+        // End of chain - perform actual HTTP call
+        HttpResponse* response = allocator::alloc(self.allocator, HttpResponse);
+        response.init(self.allocator);
+        self.client.do_request(request, response)!;
+        return response;
+    }
+    // Call next middleware
+    Middleware current = self.middlewares[self.index++];
+    return current.handle(request, self);
+}
+----
+
+=== HttpClient Integration
+
+The `HttpClient` maintains a list of middleware and builds the chain for each request.
+
+[source,c3]
+----
+struct HttpClient {
+    Curl* handle;
+    Middleware[] middlewares;
+}
+
+fn void HttpClient.use(&self, Middleware middleware) {
+    // Append middleware to the stack
+}
+
+fn HttpResponse!? HttpClient.request(&self, HttpRequest* request, Allocator allocator) {
+    MiddlewareChain chain = {
+        .middlewares = self.middlewares,
+        .index = 0,
+        .client = self,
+        .allocator = allocator
+    };
+    return chain.proceed(request);
+}
+----
+
+== Built-in Middleware
+
+=== RetryMiddleware
+
+Automatically retries failed requests with configurable retry count and backoff.
+
+[source,c3]
+----
+struct RetryMiddleware (Middleware) {
+    int max_retries;
+    int[] retry_on_status;      // HTTP status codes to retry, e.g., [502, 503, 504]
+    int base_delay_ms;          // Base delay for exponential backoff
+}
+
+fn HttpResponse!? RetryMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    for (int attempt = 0; attempt <= self.max_retries; attempt++) {
+        if (attempt > 0) {
+            int delay = self.base_delay_ms * (1 << (attempt - 1));  // Exponential backoff
+            time::sleep(time::ms(delay));
+        }
+
+        HttpResponse!? response = chain.proceed(request);
+
+        if (catch err = response) {
+            if (attempt == self.max_retries) return err~;
+            chain.index = 0;  // Reset chain for retry
+            continue;
+        }
+
+        if (!self.should_retry(response.status)) {
+            return response;
+        }
+        chain.index = 0;  // Reset chain for retry
+    }
+    return RETRY_EXHAUSTED~;
+}
+
+fn bool RetryMiddleware.should_retry(&self, int status) {
+    foreach (s : self.retry_on_status) {
+        if (s == status) return true;
+    }
+    return false;
+}
+----
+
+==== Usage
+
+[source,c3]
+----
+RetryMiddleware retry = {
+    .max_retries = 3,
+    .retry_on_status = { 502, 503, 504 },
+    .base_delay_ms = 100
+};
+client.use(&retry);
+----
+
+=== CacheMiddleware
+
+Caches GET responses to avoid redundant network requests.
+
+[source,c3]
+----
+struct CacheEntry {
+    HttpResponse response;
+    Time expires_at;
+}
+
+struct CacheMiddleware (Middleware) {
+    HashMap(<String, CacheEntry>) cache;
+    int ttl_seconds;
+}
+
+fn HttpResponse!? CacheMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    // Only cache GET requests
+    if (request.method == GET) {
+        if (try entry = self.cache.get(request.url)) {
+            if (time::now() < entry.expires_at) {
+                return &entry.response;  // Cache hit - short-circuit
+            }
+            self.cache.remove(request.url);  // Expired
+        }
+    }
+
+    HttpResponse!? response = chain.proceed(request);
+
+    // Cache successful GET responses
+    if (try resp = response) {
+        if (request.method == GET && resp.status >= 200 && resp.status < 300) {
+            CacheEntry entry = {
+                .response = *resp,
+                .expires_at = time::now() + time::seconds(self.ttl_seconds)
+            };
+            self.cache.set(request.url, entry);
+        }
+    }
+
+    return response;
+}
+----
+
+==== Usage
+
+[source,c3]
+----
+CacheMiddleware cache;
+cache.cache.init(mem);
+cache.ttl_seconds = 300;  // 5 minutes
+client.use(&cache);
+----
+
+=== AuthMiddleware
+
+Handles authentication headers and automatic token refresh on 401 responses.
+
+[source,c3]
+----
+alias RefreshFunc = fn String!?();
+
+struct AuthMiddleware (Middleware) {
+    String* access_token;       // Pointer to current token (mutable)
+    String refresh_token;
+    RefreshFunc refresh_func;   // Callback to refresh the token
+    bool retry_attempted;       // Prevent infinite retry loops
+}
+
+fn HttpResponse!? AuthMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    // Add Authorization header if we have a token
+    if (self.access_token && (*self.access_token).len > 0) {
+        DString header;
+        header.tinit();
+        header.appendf("Authorization: Bearer %s", *self.access_token);
+        request.set_header(header.zstr_view());
+    }
+
+    HttpResponse!? response = chain.proceed(request);
+
+    // Handle 401 Unauthorized - attempt token refresh
+    if (try resp = response) {
+        if (resp.status == 401 && !self.retry_attempted && self.refresh_func != null) {
+            self.retry_attempted = true;
+            defer self.retry_attempted = false;
+
+            if (try new_token = self.refresh_func()) {
+                *self.access_token = new_token;
+                chain.index = 0;  // Reset chain
+                return chain.proceed(request);  // Retry with new token
+            }
+        }
+    }
+
+    return response;
+}
+----
+
+==== Usage
+
+[source,c3]
+----
+String current_token = "initial_token";
+
+fn String!? refresh_my_token() {
+    // Call your token refresh endpoint
+    // Return new token or error
+}
+
+AuthMiddleware auth = {
+    .access_token = &current_token,
+    .refresh_token = "refresh_token_here",
+    .refresh_func = &refresh_my_token
+};
+client.use(&auth);
+----
+
+=== RateLimitMiddleware
+
+Limits request rate to avoid overwhelming servers or hitting API rate limits.
+
+[source,c3]
+----
+struct RateLimitMiddleware (Middleware) {
+    int requests_per_second;
+    Time last_request;
+    Mutex mutex;
+}
+
+fn void RateLimitMiddleware.init(&self, int rps) {
+    self.requests_per_second = rps;
+    self.last_request = 0;
+    self.mutex.init()!!;
+}
+
+fn HttpResponse!? RateLimitMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    self.mutex.lock()!!;
+    defer self.mutex.unlock()!!;
+
+    Time now = time::now();
+    Time min_interval = time::ms(1000 / self.requests_per_second);
+    Time elapsed = now - self.last_request;
+
+    if (elapsed < min_interval) {
+        time::sleep(min_interval - elapsed);
+    }
+
+    self.last_request = time::now();
+    return chain.proceed(request);
+}
+----
+
+==== Usage
+
+[source,c3]
+----
+RateLimitMiddleware rate_limit;
+rate_limit.init(10);  // Max 10 requests per second
+client.use(&rate_limit);
+----
+
+=== CookieMiddleware
+
+Automatically stores and sends cookies across requests.
+
+[source,c3]
+----
+struct CookieMiddleware (Middleware) {
+    HashMap(<String, String>) cookies;  // domain+path -> cookie value
+}
+
+fn HttpResponse!? CookieMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    // Add stored cookies to request
+    if (try cookie = self.cookies.get(request.host)) {
+        request.set_header_fmt("Cookie: %s", cookie);
+    }
+
+    HttpResponse!? response = chain.proceed(request);
+
+    // Extract and store Set-Cookie headers from response
+    if (try resp = response) {
+        self.extract_cookies(request.host, resp);
+    }
+
+    return response;
+}
+
+fn void CookieMiddleware.extract_cookies(&self, String host, HttpResponse* response) {
+    // Parse Set-Cookie headers and store in self.cookies
+    // Implementation depends on header access API
+}
+----
+
+=== LoggingMiddleware
+
+Logs request and response details for debugging.
+
+[source,c3]
+----
+struct LoggingMiddleware (Middleware) {
+    OutStream out;
+    bool log_headers;
+    bool log_body;
+}
+
+fn HttpResponse!? LoggingMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    Time start = time::now();
+
+    self.out.printfn("→ %s %s", request.method.value, request.url)!!;
+    if (self.log_headers) {
+        // Log request headers
+    }
+
+    HttpResponse!? response = chain.proceed(request);
+
+    Time duration = time::now() - start;
+
+    if (try resp = response) {
+        self.out.printfn("← %d (%dms)", resp.status, duration / time::MS)!!;
+        if (self.log_headers) {
+            // Log response headers
+        }
+    } else if (catch err = response) {
+        self.out.printfn("← ERROR: %s (%dms)", err, duration / time::MS)!!;
+    }
+
+    return response;
+}
+----
+
+== Middleware Order
+
+The order in which middleware is added determines execution order. Middleware added first wraps middleware added later.
+
+[cols="1,3"]
+|===
+| Position | Middleware Type
+
+| Outermost (first)
+| Retry, Logging -- needs to see final result and potentially retry everything
+
+| Middle
+| Rate limiting, Circuit breaker -- controls flow
+
+| Inner
+| Cache -- should cache authenticated responses
+
+| Innermost (last)
+| Auth, Cookies -- should be closest to actual request
+|===
+
+=== Recommended Order
+
+[source,c3]
+----
+// 1. Logging (outermost - sees everything)
+client.use(&logging);
+
+// 2. Retry (can retry the whole chain)
+client.use(&retry);
+
+// 3. Rate limiting (applies to all attempts)
+client.use(&rate_limit);
+
+// 4. Cache (caches final responses)
+client.use(&cache);
+
+// 5. Auth (innermost - adds headers just before request)
+client.use(&auth);
+----
+
+== Creating Custom Middleware
+
+To create custom middleware:
+
+1. Define a struct that implements the `Middleware` interface
+2. Implement the `handle` method with `@dynamic` attribute
+3. Call `chain.proceed(request)` to continue the chain (or don't, to short-circuit)
+4. Optionally reset `chain.index = 0` before calling `proceed` again to retry
+
+=== Example: Circuit Breaker
+
+[source,c3]
+----
+struct CircuitBreakerMiddleware (Middleware) {
+    int failure_threshold;
+    int reset_timeout_ms;
+    int failure_count;
+    Time open_until;
+    Mutex mutex;
+}
+
+enum CircuitState {
+    CLOSED,     // Normal operation
+    OPEN,       // Failing fast
+    HALF_OPEN   // Testing if service recovered
+}
+
+fn CircuitState CircuitBreakerMiddleware.state(&self) {
+    if (self.failure_count < self.failure_threshold) return CLOSED;
+    if (time::now() > self.open_until) return HALF_OPEN;
+    return OPEN;
+}
+
+fn HttpResponse!? CircuitBreakerMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    self.mutex.lock()!!;
+
+    switch (self.state()) {
+        case OPEN:
+            self.mutex.unlock()!!;
+            return CIRCUIT_OPEN~;
+
+        case HALF_OPEN:
+            self.mutex.unlock()!!;
+            HttpResponse!? response = chain.proceed(request);
+            self.mutex.lock()!!;
+
+            if (catch response) {
+                self.failure_count++;
+                self.open_until = time::now() + time::ms(self.reset_timeout_ms);
+            } else {
+                self.failure_count = 0;  // Reset on success
+            }
+
+            self.mutex.unlock()!!;
+            return response;
+
+        case CLOSED:
+            self.mutex.unlock()!!;
+            HttpResponse!? response = chain.proceed(request);
+
+            if (catch response) {
+                self.mutex.lock()!!;
+                self.failure_count++;
+                if (self.failure_count >= self.failure_threshold) {
+                    self.open_until = time::now() + time::ms(self.reset_timeout_ms);
+                }
+                self.mutex.unlock()!!;
+            }
+
+            return response;
+    }
+}
+----
+
+== Thread Safety
+
+When using middleware with concurrent requests:
+
+* **Stateless middleware** (logging, simple header injection): Safe by default
+* **Stateful middleware** (rate limiting, circuit breaker, cookie storage): Must use `Mutex` to protect shared state
+* **Token/auth middleware**: Use mutex when updating shared token state
+
+== Error Handling
+
+Middleware can handle errors in several ways:
+
+[source,c3]
+----
+fn HttpResponse!? MyMiddleware.handle(&self, HttpRequest* request, MiddlewareChain* chain) @dynamic {
+    HttpResponse!? response = chain.proceed(request);
+
+    // Option 1: Let errors propagate (do nothing)
+    return response;
+
+    // Option 2: Transform errors
+    if (catch err = response) {
+        return MY_CUSTOM_ERROR~;
+    }
+
+    // Option 3: Recover from errors
+    if (catch err = response) {
+        // Return a default/fallback response
+        return self.fallback_response;
+    }
+
+    // Option 4: Retry on error (reset chain first)
+    if (catch err = response) {
+        chain.index = 0;
+        return chain.proceed(request);
+    }
+}
+----
