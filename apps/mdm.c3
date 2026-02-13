@@ -51,30 +51,25 @@ macro log(String format, args...) {
 
 fn void? get(String url) {
   log("Download url: %s", url);
-  // defer curl::global_cleanup();
-  //
-  // Curl* conn = curl::easy_init();
-  // defer curl::easy_cleanup(conn);
-  // curl::easy_setopt(conn, curl::CURLOPT_URL, url);
-  // curl::easy_setopt(conn, curl::CURLOPT_FOLLOWLOCATION);
-  char[8192] buffer;
+  char[8064] buffer;
   ArenaAllocator arena;
   arena.init(&buffer);
-  TrackingAllocator alloc;
-  alloc.init(&arena);
+
   HttpClient client;
-  client.init(&alloc)!;
-  defer client.free();
-  for(int i = 0; i < 10; i++) {
-    arena.reset(0);
-    io::printfn("Allocated: %d", alloc.total_allocated());
-    HttpResponse* response = client.get_sync(url)!;
-  }
-  // io::printn("=== HEADERS ===");
-  // io::printn(response.headers);
-  // io::printn("=== RESPONSE ===");
-  // io::printn(response.body.str_view());
+  client.init()!;
+  defer client.close();
+
+  HttpResponse response;
+  response.init(&arena);
+
+  client.request_sync(GET, "https://jsonplaceholder.typicode.com/posts/1", null, &response)!;
+  io::printn(response);
+
+  String json = `{"title": "MyTitle", "body": "MyBody", "userId": 1}`;
+  client.request_sync(POST, "https://jsonplaceholder.typicode.com/posts", json, &response)!;
+  io::printn(response);
 }
+
 
 fn int main(String[] args)
 {
