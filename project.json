@@ -6,6 +6,7 @@
   "authors":  [ "Kinch" ],
   "version": "0.1.0",
   "sources":  [ "src/**" ],
+  "c-sources": [ "vendor/**" ],
   "test-sources":  [ "test/**" ],
   "build-dir": "build",
   "output": "build",

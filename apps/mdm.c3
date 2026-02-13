@@ -6,6 +6,7 @@
 import std::io;
 import curl;
 import hc;
+import yyjson;
 
 bitstruct CurlHFlags : uint {
   bool header;
@@ -16,37 +17,6 @@ macro log(String format, args...) {
   io::printf("[%s:%d]: ", $$FILE, $$LINE);
   io::printfn(format, ...args);
 }
-
-// struct Response {
-//   DString headers;
-//   DString body;
-// }
-//
-// fn void Response.init(&self, Allocator alloc) {
-//   self.headers.init(alloc);
-//   self.body.init(alloc);
-// }
-//
-// fn usz write_call_back(
-//   char* content, 
-//   usz size, 
-//   usz num_items,
-//   DString* outstream)  {
-//   String text = (String)content[:num_items];
-//   outstream.append(text);
-//   return size * num_items;
-// }
-//
-// fn usz header_call_cack(
-//   ZString content,
-//   usz size,
-//   usz num_items,
-//   DString* outstream
-// ) {
-//   String text = (String)content[:num_items];
-//   outstream.append(text);
-//   return size * num_items;
-// }
 
 
 fn void? get(String url) {
@@ -62,12 +32,31 @@ fn void? get(String url) {
   HttpResponse response;
   response.init(&arena);
 
-  client.request_sync(GET, "https://jsonplaceholder.typicode.com/posts/1", null, &response)!;
-  io::printn(response);
+  yyjson::Doc doc;
 
+  // GET request
+  HttpRequest get_req = hc::get("https://jsonplaceholder.typicode.com/posts/1");
+  client.request_sync(&get_req, &response)!;
+  yyjson::Val root = yyjson::parse_bytes(&response.body, &doc)!;
+  defer yyjson::doc_free(doc);
+  io::printn("=== GET Response ===");
+  io::printn(root.pretty());
+
+  // POST request with JSON body and Content-Type header
+  HttpRequest post_req = hc::post("https://jsonplaceholder.typicode.com/posts");
+  post_req.set_header("Content-Type: application/json");
   String json = `{"title": "MyTitle", "body": "MyBody", "userId": 1}`;
-  client.request_sync(POST, "https://jsonplaceholder.typicode.com/posts", json, &response)!;
-  io::printn(response);
+  io::ByteReader body;
+  body.init(json);
+  post_req.set_body(&body);
+  defer post_req.free();
+
+  client.request_sync(&post_req, &response)!;
+  yyjson::Doc doc2;
+  yyjson::Val root2 = yyjson::parse_bytes(&response.body, &doc2)!;
+  defer yyjson::doc_free(doc2);
+  io::printn("=== POST Response ===");
+  io::printn(root2.pretty());
 }
 
 

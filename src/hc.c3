@@ -27,21 +27,80 @@ enum HttpMethod : char(ZString value) {
   OPTIONS = "OPTIONS"
 }
 
+struct HttpRequest {
+  HttpMethod method;
+  String url;
+  curl::Slist* headers;
+  InStream body;
+}
+
+fn void HttpRequest.set_header(&self, ZString header) {
+  self.headers = curl::slist_append(self.headers, header);
+}
+
+fn void HttpRequest.set_body(&self, InStream body) {
+  self.body = body;
+}
+
+fn void HttpRequest.free(&self) {
+  if (self.headers != null) {
+    curl::slist_free_all(self.headers);
+    self.headers = null;
+  }
+}
+
+// Builder-style helpers
+fn HttpRequest get(String url) {
+  return { .method = GET, .url = url };
+}
+
+fn HttpRequest post(String url) {
+  return { .method = POST, .url = url };
+}
+
+fn HttpRequest put(String url) {
+  return { .method = PUT, .url = url };
+}
+
+fn HttpRequest delete(String url) {
+  return { .method = DELETE, .url = url };
+}
+
+fn HttpRequest patch(String url) {
+  return { .method = PATCH, .url = url };
+}
 
 struct HttpClient {
   Curl* handle;
 }
 
-struct HttpResponse (Printable) {
+struct HttpResponse (Printable, InStream) {
   Allocator allocator;
   DString headers;
   ByteWriter body;
+  usz read_index;
 }
 
 fn usz? HttpResponse.to_format(&self, Formatter* f) @dynamic {
   usz n = f.print(self.headers.str_view())!;
   n += f.print(self.body.str_view())!;
   return n;
+}
+
+fn usz? HttpResponse.read(&self, char[] buffer) @dynamic {
+  char[] data = self.body.array_view();
+  usz available = data.len - self.read_index;
+  if (available == 0) return 0;
+  usz to_read = min(buffer.len, available);
+  buffer[:to_read] = data[self.read_index:self.read_index + to_read];
+  self.read_index += to_read;
+  return to_read;
+}
+
+fn char? HttpResponse.read_byte(&self) @dynamic {
+  char[] data = self.body.array_view();
+  if (self.read_index >= data.len) return io::EOF~;
+  return data[self.read_index++];
 }
 
 fn void HttpResponse.init(&self, Allocator alloc) {
@@ -55,6 +114,7 @@ fn void HttpResponse.reset(&self) {
   // This allows bump allocator to reuse memory efficiently
   self.headers = {};
   self.body = {};
+  self.read_index = 0;
   self.headers.init(self.allocator);
   self.body.init(self.allocator);
 }
@@ -89,46 +149,28 @@ fn void HttpClient.set(HttpClient* self, HttpCallOptions options) {
   );
 }
 
-macro void? HttpClient.request_sync(
+fn void? HttpClient.request_sync(
   HttpClient* self,
-  HttpMethod method,
-  String url,
-  body,
+  HttpRequest* request,
   HttpResponse* response)
-{
-  var $Type = $typeof(body);
-  $if $Type.typeid == String.typeid:
-    io::ByteReader reader;
-    reader.init(body);
-    return self.request_sync_stream(method, url, &reader, response);
-  $else
-    $if $Type.typeid == void*.typeid:
-      return self.request_sync_stream(method, url, null, response);
-    $else
-      return self.request_sync_stream(method, url, body, response);
-    $endif
-  $endif
-}
-
-fn void? HttpClient.request_sync_stream(
-  HttpClient* self,
-  HttpMethod method,
-  String url,
-  InStream body,
-  HttpResponse* response) @private
 {
   response.reset();
 
-  curl::easy_setopt(self.handle, curl::CURLOPT_CUSTOMREQUEST, method.value);
-  curl::easy_setopt(self.handle, curl::CURLOPT_URL, url);
+  curl::easy_setopt(self.handle, curl::CURLOPT_CUSTOMREQUEST, request.method.value);
+  curl::easy_setopt(self.handle, curl::CURLOPT_URL, request.url);
   curl::easy_setopt(self.handle, curl::CURLOPT_WRITEDATA, response);
   curl::easy_setopt(self.handle, curl::CURLOPT_HEADERDATA, response);
 
+  // Set custom headers if provided
+  if (request.headers != null) {
+    curl::easy_setopt(self.handle, curl::CURLOPT_HTTPHEADER, request.headers);
+  }
+
   // Set up request body if provided
-  if (body) {
+  if (request.body) {
     curl::easy_setopt(self.handle, curl::CURLOPT_POST, 1);
     curl::easy_setopt(self.handle, curl::CURLOPT_READFUNCTION, &read_call_back);
-    curl::easy_setopt(self.handle, curl::CURLOPT_READDATA, &body);
+    curl::easy_setopt(self.handle, curl::CURLOPT_READDATA, &request.body);
   } else {
     curl::easy_setopt(self.handle, curl::CURLOPT_POST, 0);
     curl::easy_setopt(self.handle, curl::CURLOPT_READDATA, null);
