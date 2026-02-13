@@ -1,11 +1,23 @@
 module yyjson;
 import std::io;
+import std::core::mem;
 
-// Opaque types
-alias Doc = void*;
+// Opaque types (internal)
+alias YYDoc = void*;
 alias Val = void*;
-alias MutDoc = void*;
-alias MutVal = void*;
+
+// C3 allocator bridge functions - called from C
+fn void* c3_alloc_malloc(Allocator* alloc, usz size) @extern("c3_alloc_malloc") @export {
+  return (*alloc).acquire(size, NO_ZERO, 0) ?? null;
+}
+
+fn void* c3_alloc_realloc(Allocator* alloc, void* ptr, usz old_size, usz new_size) @extern("c3_alloc_realloc") @export {
+  return (*alloc).resize(ptr, new_size, 0) ?? null;
+}
+
+fn void c3_alloc_free(Allocator* alloc, void* ptr) @extern("c3_alloc_free") @export {
+  (*alloc).release(ptr, false);
+}
 
 // JSON value types
 const char TYPE_NONE = 0;
@@ -57,10 +69,11 @@ struct ObjIter {
   Val obj;
 }
 
-// Document functions (using wrapper for inline functions)
-extern fn Doc read(char* dat, usz len, uint flg) @extern("c3_yyjson_read");
-extern fn void doc_free(Doc doc) @extern("c3_yyjson_doc_free");
-extern fn Val doc_get_root(Doc doc) @extern("c3_yyjson_doc_get_root");
+// Internal document functions
+extern fn YYDoc yy_read(char* dat, usz len, uint flg) @extern("c3_yyjson_read") @private;
+extern fn YYDoc yy_read_with_alloc(char* dat, usz len, uint flg, Allocator* alloc) @extern("c3_yyjson_read_with_alloc") @private;
+extern fn void yy_doc_free(YYDoc doc) @extern("c3_yyjson_doc_free") @private;
+extern fn Val yy_doc_get_root(YYDoc doc) @extern("c3_yyjson_doc_get_root") @private;
 
 // Type checking (using wrappers)
 extern fn bool is_null(Val val) @extern("c3_yyjson_is_null");
@@ -115,35 +128,20 @@ fn usz? Pretty.to_format(&self, Formatter* f) @dynamic {
   return f.print((String)json[:len]);
 }
 
-// Helper: parse a string and return root value (caller must free doc)
-fn Val? parse(String json, Doc* out_doc) {
-  Doc doc = read(json.ptr, json.len, READ_NOFLAG);
+// Parse JSON string, returns root Val
+// When using allocator (e.g. arena), memory is managed by the allocator
+fn Val? parse(String json, Allocator allocator) {
+  YYDoc doc = yy_read_with_alloc(json.ptr, json.len, READ_NOFLAG, &allocator);
   if (doc == null) return PARSE_ERROR~;
-  *out_doc = doc;
-  return doc_get_root(doc);
-}
-
-// Parse from InStream (e.g., HttpResponse)
-// Reads entire stream into buffer, then parses
-fn Val? parse_stream(InStream stream, Doc* out_doc, Allocator allocator) {
-  io::ByteWriter buffer;
-  buffer.init(allocator);
-  buffer.read_from(stream)!;
-
-  char[] data = buffer.array_view();
-  Doc doc = read(data.ptr, data.len, READ_NOFLAG);
-  if (doc == null) return PARSE_ERROR~;
-  *out_doc = doc;
-  return doc_get_root(doc);
+  return yy_doc_get_root(doc);
 }
 
 // Parse directly from a ByteWriter (efficient, no copy)
-fn Val? parse_bytes(io::ByteWriter* writer, Doc* out_doc) {
+fn Val? parse_bytes(io::ByteWriter* writer, Allocator allocator) {
   char[] data = writer.array_view();
-  Doc doc = read(data.ptr, data.len, READ_NOFLAG);
+  YYDoc doc = yy_read_with_alloc(data.ptr, data.len, READ_NOFLAG, &allocator);
   if (doc == null) return PARSE_ERROR~;
-  *out_doc = doc;
-  return doc_get_root(doc);
+  return yy_doc_get_root(doc);
 }
 
 faultdef PARSE_ERROR;

@@ -1,4 +1,41 @@
 #include "yyjson.h"
+#include <stdint.h>
+
+// C3 Allocator interface - matches C3's Allocator struct layout
+// The C3 Allocator is a fat pointer: (data_ptr, vtable_ptr)
+typedef struct {
+    void *data;
+    void *vtable;
+} C3Allocator;
+
+// C3 allocator functions - implemented in C3 and exported
+extern void* c3_alloc_malloc(C3Allocator* alloc, size_t size);
+extern void* c3_alloc_realloc(C3Allocator* alloc, void* ptr, size_t old_size, size_t new_size);
+extern void c3_alloc_free(C3Allocator* alloc, void* ptr);
+
+// yyjson allocator callbacks that forward to C3
+static void* c3_yyjson_malloc(void *ctx, size_t size) {
+    return c3_alloc_malloc((C3Allocator*)ctx, size);
+}
+
+static void* c3_yyjson_realloc(void *ctx, void *ptr, size_t old_size, size_t size) {
+    return c3_alloc_realloc((C3Allocator*)ctx, ptr, old_size, size);
+}
+
+static void c3_yyjson_free(void *ctx, void *ptr) {
+    c3_alloc_free((C3Allocator*)ctx, ptr);
+}
+
+// Create a yyjson allocator from C3 allocator
+yyjson_doc* c3_yyjson_read_with_alloc(const char *dat, size_t len, yyjson_read_flag flg, C3Allocator *alloc) {
+    yyjson_alc alc = {
+        .malloc = c3_yyjson_malloc,
+        .realloc = c3_yyjson_realloc,
+        .free = c3_yyjson_free,
+        .ctx = alloc
+    };
+    return yyjson_read_opts((char*)dat, len, flg, &alc, NULL);
+}
 
 // Wrapper functions for inline functions that C3 needs to call
 

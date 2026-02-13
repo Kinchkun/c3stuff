@@ -1,4 +1,5 @@
 import std::io;
+import std::core::mem::allocator;
 import curl;
 
 faultdef INIT_ERROR, CALL_ERROR;
@@ -32,14 +33,21 @@ struct HttpRequest {
   String url;
   curl::Slist* headers;
   InStream body;
+  io::ByteReader body_reader;  // Storage for string body
 }
 
 fn void HttpRequest.set_header(&self, ZString header) {
   self.headers = curl::slist_append(self.headers, header);
 }
 
-fn void HttpRequest.set_body(&self, InStream body) {
-  self.body = body;
+macro void HttpRequest.set_body(&self, body) {
+  var $Type = $typeof(body);
+  $if $Type.typeid == String.typeid:
+    self.body_reader.init(body);
+    self.body = &self.body_reader;
+  $else
+    self.body = body;
+  $endif
 }
 
 fn void HttpRequest.free(&self) {
@@ -220,4 +228,117 @@ fn usz read_call_back(
 ) @private {
   usz bytes_read = (*body).read(buffer[:size * num_items]) ?? 0;
   return bytes_read;
+}
+
+// Multi-request support using curl multi interface
+alias MultiCallback = fn void(HttpRequest* request, HttpResponse* response);
+
+struct MultiRequestContext {
+  HttpRequest* request;
+  HttpResponse* response;
+  curl::Curl* easy_handle;
+}
+
+fn void? HttpClient.request_multi(
+  HttpClient* self,
+  HttpRequest[] requests,
+  Allocator allocator,
+  MultiCallback callback)
+{
+  if (requests.len == 0) return;
+
+  // Create multi handle
+  curl::CurlM* multi = curl::multi_init();
+  if (multi == null) return INIT_ERROR~;
+  defer curl::multi_cleanup(multi);
+
+  // Allocate contexts for each request
+  MultiRequestContext[] contexts = allocator::alloc_array(allocator, MultiRequestContext, requests.len);
+
+  // Set up each request
+  foreach (i, &req : requests) {
+    // Create easy handle for this request
+    curl::Curl* easy = curl::easy_init();
+    if (easy == null) {
+      io::printfn("Failed to create easy handle for request %d", i);
+      continue;
+    }
+
+    // Create response object
+    HttpResponse* response = allocator::alloc(allocator, HttpResponse);
+    response.init(allocator);
+
+    // Store context
+    contexts[i] = {
+      .request = req,
+      .response = response,
+      .easy_handle = easy
+    };
+
+    // Configure the easy handle
+    curl::easy_setopt(easy, curl::CURLOPT_CUSTOMREQUEST, req.method.value);
+    curl::easy_setopt(easy, curl::CURLOPT_URL, req.url);
+    curl::easy_setopt(easy, curl::CURLOPT_WRITEFUNCTION, &write_call_back);
+    curl::easy_setopt(easy, curl::CURLOPT_WRITEDATA, response);
+    curl::easy_setopt(easy, curl::CURLOPT_HEADERFUNCTION, &header_call_cack);
+    curl::easy_setopt(easy, curl::CURLOPT_HEADERDATA, response);
+
+    // Store pointer to context as private data to retrieve later
+    curl::easy_setopt(easy, curl::CURLOPT_PRIVATE, &contexts[i]);
+
+    // Set custom headers if provided
+    if (req.headers != null) {
+      curl::easy_setopt(easy, curl::CURLOPT_HTTPHEADER, req.headers);
+    }
+
+    // Set up request body if provided
+    if (req.body) {
+      curl::easy_setopt(easy, curl::CURLOPT_POST, 1);
+      curl::easy_setopt(easy, curl::CURLOPT_READFUNCTION, &read_call_back);
+      curl::easy_setopt(easy, curl::CURLOPT_READDATA, &req.body);
+    }
+
+    // Add to multi handle
+    curl::multi_add_handle(multi, easy);
+  }
+
+  // Perform all requests
+  int still_running = 1;
+  while (still_running > 0) {
+    curl::CURLMcode mc = curl::multi_perform(multi, &still_running);
+
+    // CURLM_OK is 0 in libcurl (binding enum is incorrect)
+    // CURLM_CALL_MULTI_PERFORM is -1 (deprecated, means call again)
+    if ((int)mc > 0) {
+      ZString err = (ZString)curl::multi_strerror(mc);
+      io::printfn("multi_perform error: %d - %s", (int)mc, err);
+      break;
+    }
+
+    // Check for completed transfers
+    int msgs_left;
+    curl::CURLMsg* msg;
+    while ((msg = curl::multi_info_read(multi, &msgs_left)) != null) {
+      if (msg.msg == curl::CURLMsgEnum.CURLMSG_DONE) {
+        // Get the context for this handle
+        MultiRequestContext* ctx;
+        curl::easy_getinfo(msg.easy_handle, curl::CURLINFO_PRIVATE, &ctx);
+
+        if (ctx != null) {
+          // Call the callback
+          callback(ctx.request, ctx.response);
+        }
+
+        // Remove and cleanup the easy handle
+        curl::multi_remove_handle(multi, msg.easy_handle);
+        curl::easy_cleanup(msg.easy_handle);
+      }
+    }
+
+    // Wait for activity if still running
+    if (still_running > 0) {
+      int numfds;
+      curl::multi_poll(multi, null, 0, 1000, &numfds);
+    }
+  }
 }
